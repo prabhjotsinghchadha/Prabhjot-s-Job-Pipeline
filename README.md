@@ -1,4 +1,4 @@
-# MR.Jobs
+# Prabhjot's Pipeline
 
 **Your AI job hunting command center.**
 
@@ -13,7 +13,7 @@ Discovers. Scores. Tailors. Applies. Tracks. -- All running locally on your mach
 
 ---
 
-MR.Jobs is a self-hosted, AI-powered job hunting automation system. It continuously discovers jobs from 7+ sources, scores every listing against your actual resume, generates tailored application materials, auto-fills forms via browser automation, and tracks your entire pipeline with follow-up reminders and ghost detection -- all from a real-time local dashboard.
+Prabhjot's Pipeline is a self-hosted, AI-powered job hunting automation system. It continuously discovers jobs from 7+ sources, scores every listing against your actual resume, generates tailored application materials, auto-fills forms via browser automation, and tracks your entire pipeline with follow-up reminders and ghost detection -- all from a real-time local dashboard.
 
 ```
   DISCOVER          SCORE            TAILOR           APPLY            TRACK
@@ -28,9 +28,9 @@ MR.Jobs is a self-hosted, AI-powered job hunting automation system. It continuou
 ## Dashboard
 
 <p align="center">
-  <img src="docs/screenshots/dashboard.png" alt="MR.Jobs Dashboard" width="800" />
+  <img src="docs/screenshots/dashboard.png" alt="Prabhjot's Pipeline Dashboard" width="800" />
 </p>
-<p align="center"><em>The MR.Jobs dashboard -- real-time job intelligence at a glance</em></p>
+<p align="center"><em>The Prabhjot's Pipeline dashboard -- real-time job intelligence at a glance</em></p>
 
 |                                                      |                                                        |
 | ---------------------------------------------------- | ------------------------------------------------------ |
@@ -45,7 +45,7 @@ MR.Jobs is a self-hosted, AI-powered job hunting automation system. It continuou
 
 ### Discovery Engine -- 7+ Sources
 
-MR.Jobs casts the widest possible net, pulling listings from direct ATS APIs, aggregated job boards, community threads, and any custom career page you point it at.
+Prabhjot's Pipeline casts the widest possible net, pulling listings from direct ATS APIs, aggregated job boards, community threads, and any custom career page you point it at.
 
 | Source              | Module                        | Coverage                                                           | API Key Required |
 | ------------------- | ----------------------------- | ------------------------------------------------------------------ | ---------------- |
@@ -74,7 +74,7 @@ The minimum score threshold is configurable (default: 65). Jobs below the thresh
 
 ### AI Resume Tailoring
 
-For high-match jobs (score 80+), MR.Jobs generates tailored application materials specific to each posting:
+For high-match jobs (score 80+), Prabhjot's Pipeline generates tailored application materials specific to each posting:
 
 - **Tailored professional summary** -- 2-3 sentences optimized for the specific role
 - **Achievement bullets** -- your real accomplishments rewritten to emphasize relevance
@@ -121,7 +121,7 @@ Components that can be independently routed: scoring, cover letter generation, r
 
 ### Setup Wizard
 
-On first launch, MR.Jobs presents a guided setup wizard in the browser. No manual YAML editing is required to get started:
+On first launch, Prabhjot's Pipeline presents a guided setup wizard in the browser. No manual YAML editing is required to get started:
 
 1. Enter your personal information
 2. Upload your resume (PDF)
@@ -139,7 +139,7 @@ The wizard writes `profile.yaml` for you. Advanced users can still edit the file
 
 ```bash
 git clone https://github.com/humancto/mr-jobs.git
-cd mrjobs
+cd mr-jobs
 docker compose up
 ```
 
@@ -155,7 +155,7 @@ CLAUDE_AUTH_TOKEN=your_token docker compose up
 
 ```bash
 git clone https://github.com/humancto/mr-jobs.git
-cd mrjobs
+cd mr-jobs
 bash setup.sh
 python3 main.py server --port 8080
 ```
@@ -189,7 +189,7 @@ python3 main.py stats
 
 ## Configuration
 
-MR.Jobs is configured through `profile.yaml`. The setup wizard generates this file, or you can create it manually from `profile.yaml.example`.
+Prabhjot's Pipeline is configured through `profile.yaml`. The setup wizard generates this file, or you can create it manually from `profile.yaml.example`.
 
 ```yaml
 personal:
@@ -370,7 +370,7 @@ The dashboard server exposes a REST API at `http://localhost:8080`. All endpoint
 
 ```
                     ┌──────────────────────┐
-                    │   MR.Jobs Dashboard   │
+                    │   Prabhjot's Pipeline Dashboard   │
                     │   localhost:8080      │
                     └─────────┬────────────┘
                               │ REST + WebSocket
@@ -405,7 +405,7 @@ The dashboard server exposes a REST API at `http://localhost:8080`. All endpoint
 ## File Structure
 
 ```
-mrjobs/
+mr-jobs/
   main.py                          CLI entry point and command orchestrator
   profile.yaml                     User configuration (created by setup wizard)
   profile.yaml.example             Example configuration for reference
@@ -454,7 +454,7 @@ mrjobs/
 
 ## Safety Features
 
-MR.Jobs is designed to keep you in control at every step:
+Prabhjot's Pipeline is designed to keep you in control at every step:
 
 - **Dry run by default** -- the `apply` command fills forms but never submits unless you explicitly pass `--live`
 - **Daily application limits** -- configurable cap (default: 25 per day) prevents runaway submissions
@@ -469,7 +469,7 @@ MR.Jobs is designed to keep you in control at every step:
 
 ## Background Scheduling
 
-When running in server mode, MR.Jobs automatically schedules background jobs:
+When running in server mode, Prabhjot's Pipeline automatically schedules background jobs:
 
 | Job             | Default Interval | Description                                        |
 | --------------- | ---------------- | -------------------------------------------------- |

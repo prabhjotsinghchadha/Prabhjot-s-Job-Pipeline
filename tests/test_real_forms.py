@@ -600,7 +600,7 @@ async def generate_report():
     from playwright.async_api import async_playwright
 
     print("=" * 70)
-    print("  MR.Jobs Form Adapter — Real-Form Compatibility Report")
+    print("  Prabhjot's Pipeline Form Adapter — Real-Form Compatibility Report")
     print(f"  Generated: {datetime.now(timezone.utc).isoformat()}")
     print("=" * 70)
 

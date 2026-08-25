@@ -37,6 +37,9 @@ nohup.out
 # Profile (contains PII)
 profile.yaml
 
+# Secrets
+.env
+
 # Screenshots (may contain PII from live sessions)
 *.png
 

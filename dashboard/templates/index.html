@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>MR.Jobs — Job Intelligence</title>
+    <title>Prabhjot's Pipeline — Job Intelligence</title>
 
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -27,7 +27,7 @@
     <link rel="stylesheet" href="/static/style.css" />
 </head>
 
-<body x-data="mrjobs()" x-init="init()" x-cloak>
+<body x-data="pipeline()" x-init="init()" x-cloak>
 
     <!-- ===================================================================
          FIRST-RUN SETUP WIZARD
@@ -38,7 +38,7 @@
         <div class="text-center mb-8">
           <div class="inline-flex items-center gap-3 mb-4">
             <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-white text-xl font-bold">MR</div>
-            <span class="text-3xl font-bold text-white tracking-tight" style="font-family: var(--font-display);">MR.Jobs</span>
+            <span class="text-3xl font-bold text-white tracking-tight" style="font-family: var(--font-display);">Prabhjot's Pipeline</span>
           </div>
           <p class="text-[#64748b] text-sm" style="font-family: var(--font-mono);">First-time setup — let's configure your job search</p>
         </div>
@@ -190,7 +190,7 @@
           <!-- Step 4: Review -->
           <div x-show="wizardStep === 4">
             <h2 class="text-lg font-semibold text-white mb-1">Review & Launch</h2>
-            <p class="text-[#64748b] text-xs mb-6" style="font-family: var(--font-mono);">Confirm your settings and start MR.Jobs</p>
+            <p class="text-[#64748b] text-xs mb-6" style="font-family: var(--font-mono);">Confirm your settings and start Prabhjot's Pipeline</p>
 
             <div class="space-y-4 text-sm">
               <div class="p-3 rounded-lg bg-[#0a0e17] border border-[#1e293b]">
@@ -223,7 +223,7 @@
             <div x-show="wizardStep === 1"></div>
             <button x-show="wizardStep < 4" @click="wizardNext()" class="cmd-btn primary">Next</button>
             <button x-show="wizardStep === 4" @click="wizardSubmit()" class="cmd-btn primary" style="background: rgba(16, 185, 129, 0.15); color: #10b981; border-color: rgba(16, 185, 129, 0.4);">
-              Launch MR.Jobs
+              Launch Prabhjot's Pipeline
             </button>
           </div>
         </div>
@@ -244,7 +244,7 @@
                         </svg>
                     </div>
                     <div>
-                        <h1 class="text-sm font-bold tracking-tight text-white" style="font-family:var(--font-display)">MR.Jobs</h1>
+                        <h1 class="text-sm font-bold tracking-tight text-white" style="font-family:var(--font-display)">Prabhjot's Pipeline</h1>
                         <p class="text-[0.55rem] font-mono tracking-[0.15em] uppercase text-[#64748b] -mt-0.5">Job Intelligence Dashboard</p>
                     </div>
                 </div>
@@ -1641,7 +1641,7 @@
 
     <footer class="max-w-[1600px] mx-auto px-4 py-4 text-center">
         <p class="text-[0.55rem] font-mono tracking-[0.2em] uppercase text-[#334155]">
-            MR.Jobs v1.0 — Real-time telemetry via WebSocket
+            Prabhjot's Pipeline v1.0 — Real-time telemetry via WebSocket
         </p>
     </footer>
 

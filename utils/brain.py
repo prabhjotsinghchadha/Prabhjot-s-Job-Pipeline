@@ -183,7 +183,7 @@ Return this exact JSON structure:
   "skill_overlap": ["<matching skills>"],
   "missing_skills": ["<skills they want that applicant lacks>"],
   "red_flags": ["<any concerns>"],
-  "cover_letter": "<2-3 paragraph tailored cover letter>",
+  "cover_letter": "<2-3 paragraph tailored cover letter, or empty string — see rule below>",
   "improve_match": "<one suggestion to improve match for this job>"
 }}
 
@@ -194,6 +194,7 @@ Scoring guidelines:
 - Below 50: Poor match
 - If the company is in the favorites list, add 10 bonus points (max 100)
 - Set "apply" to true only if score >= {profile['preferences'].get('min_match_score', 65)}
+- Write the cover_letter ONLY if score >= {profile['preferences'].get('min_match_score', 65)}; otherwise set cover_letter to "" — do not waste effort on poor matches
 """
         return self.ask_json(prompt, component="scoring")
 

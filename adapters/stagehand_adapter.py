@@ -11,6 +11,7 @@ compact form analysis that fits the CLI context window.
 """
 
 import os
+import re
 import json
 import time
 import random
@@ -1702,6 +1703,19 @@ async def apply_smart(
         )
         resolved = resolution["resolved_url"]
         method = resolution["resolution"]
+
+        # Auth-walled destinations (YC / Work at a Startup, LinkedIn, etc.) cannot
+        # be auto-filled: signing in on the user's behalf is out of scope. Bail out
+        # with guidance instead of letting the AI adapter fight a login form.
+        from urllib.parse import urlparse
+        _path = urlparse(resolved).path.lower()
+        _host = (urlparse(resolved).hostname or "").lower()
+        if (re.search(r"/(login|signin|sign-in|sign_in|authenticate)([/?#]|$)", _path)
+                or _host in ("account.ycombinator.com", "www.linkedin.com") and "authwall" in resolved.lower()
+                or _host == "account.ycombinator.com"):
+            print(f"  [!] Application requires an account login: {resolved[:90]}")
+            print(f"      Auto-apply cannot sign in for you — apply manually at the link above.")
+            return False
 
         if resolved != job_url:
             print(f"  [+] Resolved ({method}): {resolved[:80]}")

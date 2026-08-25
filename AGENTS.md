@@ -1,6 +1,6 @@
-# MR.Jobs Agent Instructions
+# Prabhjot's Pipeline Agent Instructions
 
-This file tells Claude Code (or any AI agent) how the MR.Jobs system works so each new session can immediately understand and operate the system.
+This file tells Claude Code (or any AI agent) how the Prabhjot's Pipeline system works so each new session can immediately understand and operate the system.
 
 ## What This Is
 

@@ -2,12 +2,17 @@ services:
   mrjobs:
     build: .
     ports:
-      - "8080:8080"
+      # Loopback only — dashboard has no auth; tunnels (VS Code, ngrok) still work
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./profile.yaml:/app/profile.yaml
       - ./resumes:/app/resumes
       - ./applications.db:/app/applications.db
       - ./.cache:/app/.cache
     environment:
-      - CLAUDE_AUTH_TOKEN=${CLAUDE_AUTH_TOKEN}
+      # The `claude` CLI reads these; set exactly one.
+      # ANTHROPIC_API_KEY   — console.anthropic.com key (sk-ant-api03-...), per-token billing
+      # CLAUDE_CODE_OAUTH_TOKEN — from `claude setup-token`, uses a Pro/Max subscription
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
     restart: unless-stopped

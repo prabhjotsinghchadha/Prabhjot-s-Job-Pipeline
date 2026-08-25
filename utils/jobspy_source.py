@@ -22,6 +22,37 @@ def _clean(val, fallback=""):
     return s
 
 
+# Indeed serves a separate domain per country. Without a country matching the search
+# location the scraper silently returns US listings for a UK or AU search.
+_INDEED_COUNTRIES = {
+    "united states": "usa", "usa": "usa", "us": "usa",
+    "united kingdom": "uk", "uk": "uk", "england": "uk", "london": "uk",
+    "australia": "australia", "sydney": "australia", "melbourne": "australia",
+    "canada": "canada",
+    "germany": "germany", "berlin": "germany",
+    "netherlands": "netherlands", "amsterdam": "netherlands",
+    "ireland": "ireland", "dublin": "ireland",
+    "france": "france",
+    "spain": "spain",
+    "portugal": "portugal",
+    "poland": "poland",
+    "india": "india",
+    "singapore": "singapore",
+}
+
+
+def _indeed_country(location: str) -> str:
+    """Map a search location to the country code JobSpy needs for Indeed."""
+    loc = (location or "").strip().lower()
+    if loc in _INDEED_COUNTRIES:
+        return _INDEED_COUNTRIES[loc]
+    # Substring pass skips short codes so "us" cannot match inside "australia".
+    for name, country in _INDEED_COUNTRIES.items():
+        if len(name) > 3 and name in loc:
+            return country
+    return "usa"
+
+
 def discover_jobspy_jobs(profile: dict) -> list:
     """
     Search for jobs using python-jobspy across multiple job boards.
@@ -31,13 +62,18 @@ def discover_jobspy_jobs(profile: dict) -> list:
 
     search_config = profile.get("search", {})
     queries = search_config.get("queries", profile["preferences"].get("roles", []))
-    locations = search_config.get("locations", profile["preferences"].get("locations", ["Remote"]))
+    locations = search_config.get("locations", profile["preferences"].get("locations", ["United States"]))
     distance = search_config.get("distance_miles", 100)  # Wide net — let AI score relevance
     results_wanted = search_config.get("results_per_query", 50)  # More results per query
 
-    # Always include "Remote" if not already there
-    if not any("remote" in loc.lower() for loc in locations):
-        locations = locations + ["Remote"]
+    # JobSpy resolves each location to a real country and errors out on placeholders
+    # like "Remote" or "Worldwide", losing that whole search. Remote filtering is
+    # handled by the is_remote flag below, so drop the placeholders instead.
+    _PLACEHOLDERS = {"remote", "anywhere", "worldwide", "global", "europe"}
+    geo_locations = [loc for loc in locations if loc.strip().lower() not in _PLACEHOLDERS]
+    if not geo_locations:
+        geo_locations = ["United States"]
+    locations = geo_locations
 
     all_jobs = []
 
@@ -47,8 +83,9 @@ def discover_jobspy_jobs(profile: dict) -> list:
         print("  ⚠ python-jobspy not installed. Run: pip install python-jobspy")
         return []
 
-    # Sites to search
-    sites = ["indeed", "linkedin", "glassdoor", "zip_recruiter", "google"]
+    # Glassdoor and ZipRecruiter return 403 to this traffic every time. Excluded so a
+    # run doesn't spend a blocked round-trip per query/location on each of them.
+    sites = ["indeed", "linkedin", "google"]
 
     for query in queries:
         for location in locations:
@@ -60,7 +97,7 @@ def discover_jobspy_jobs(profile: dict) -> list:
                     location=location,
                     distance=distance,
                     results_wanted=results_wanted,
-                    country_indeed="USA",
+                    country_indeed=_indeed_country(location),
                     is_remote=profile["preferences"].get("remote_only", False),
                 )
 

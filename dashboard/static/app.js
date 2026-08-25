@@ -1,5 +1,5 @@
 /**
- * MR.Jobs — Job Intelligence Dashboard
+ * Prabhjot's Pipeline — Job Intelligence Dashboard
  *
  * Alpine.js application with:
  * - Real-time WebSocket event feed
@@ -9,7 +9,7 @@
  * - Full job CRUD with expandable detail rows
  */
 
-function mrjobs() {
+function pipeline() {
   return {
     // ----- Core State -----
     jobs: [],

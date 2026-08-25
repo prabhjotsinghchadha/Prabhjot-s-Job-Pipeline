@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MR.Jobs — AI-Powered Job Intelligence
+Prabhjot's Pipeline — AI-Powered Job Intelligence
 ======================================
 
 Uses Claude Code CLI as the AI brain + Playwright for browser automation.
@@ -23,6 +23,7 @@ Usage:
 """
 
 import asyncio
+from utils.browser import headed_supported
 import argparse
 import random
 import sys
@@ -192,7 +193,7 @@ async def cmd_apply(profile: dict, dry_run: bool = True):
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
-            headless=False,  # Show browser so you can watch/intervene
+            headless=not headed_supported(),  # headed only where a display exists
             slow_mo=100
         )
         context = await browser.new_context(
@@ -254,7 +255,7 @@ async def cmd_single(profile: dict, url: str, dry_run: bool = True):
     print(f"   Mode: {mode}\n")
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False, slow_mo=100)
+        browser = await p.chromium.launch(headless=not headed_supported(), slow_mo=100)
         context = await browser.new_context(
             viewport={"width": 1920, "height": 1080}
         )
@@ -348,7 +349,7 @@ async def cmd_rescore(profile: dict):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="MR.Jobs — AI-Powered Job Intelligence",
+        description="Prabhjot's Pipeline — AI-Powered Job Intelligence",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

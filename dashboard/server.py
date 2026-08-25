@@ -1,5 +1,5 @@
 """
-MR.Jobs Dashboard — FastAPI server with REST API and WebSocket support.
+Prabhjot's Pipeline Dashboard — FastAPI server with REST API and WebSocket support.
 Serves a local web dashboard at http://localhost:8080.
 
 Architecture notes:
@@ -11,6 +11,7 @@ Architecture notes:
 """
 
 import asyncio
+from utils.browser import headed_supported
 import base64
 import copy
 import json
@@ -72,7 +73,7 @@ async def lifespan(app):
     except Exception:
         pass
 
-app = FastAPI(title="MR.Jobs", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Prabhjot's Pipeline", version="1.0.0", lifespan=lifespan)
 
 
 @app.get("/api/health")
@@ -169,7 +170,7 @@ EventBus.subscribe(_on_event)
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request) -> HTMLResponse:
     """Serve the single-page dashboard."""
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request, "index.html")
 
 
 # ===========================================================================
@@ -669,7 +670,7 @@ async def rescore_job(job_id: str) -> dict:
                 job.get("description", "")
                 or f"Job: {job['title']} at {job['company']}. Location: {job['location']}"
             )
-            result = brain.match_job(desc, profile, resume_text=resume_text)
+            result = await asyncio.to_thread(brain.match_job, desc, profile, resume_text=resume_text)
             score: int = result.get("score", 0)
             reasoning: str = result.get("reasoning", "")
             cover_letter: str = result.get("cover_letter", "")
@@ -771,6 +772,9 @@ async def score_all_unscored() -> dict:
             resume_text = extract_resume_text(profile.get("resume_path", ""))
             min_score: int = profile["preferences"].get("min_match_score", 65)
 
+            scored_ok = 0
+            consecutive_failures = 0
+            last_error = ""
             for job_row in unscored:
                 try:
                     desc = (
@@ -780,7 +784,7 @@ async def score_all_unscored() -> dict:
                             f"Location: {job_row['location']}"
                         )
                     )
-                    result = brain.match_job(desc, profile, resume_text=resume_text)
+                    result = await asyncio.to_thread(brain.match_job, desc, profile, resume_text=resume_text)
                     score: int = result.get("score", 0)
                     log_matched(
                         job_row["id"],
@@ -790,9 +794,29 @@ async def score_all_unscored() -> dict:
                     )
                     if score < min_score:
                         log_skipped(job_row["id"], f"Score {score} < {min_score}")
-                except Exception:
-                    # Skip individual failures so the batch continues
-                    pass
+                    scored_ok += 1
+                    consecutive_failures = 0
+                except Exception as exc:
+                    # Tolerate isolated failures, but a backend that fails on every
+                    # job (bad auth token, CLI missing) would otherwise silently
+                    # churn for hours and then report "complete".
+                    consecutive_failures += 1
+                    last_error = str(exc)[:300]
+                    # Abort on a dead backend: immediately when nothing has ever
+                    # scored, or after a sustained mid-run failure streak (auth
+                    # expiry, usage-limit exhaustion) — never churn silently.
+                    if (scored_ok == 0 and consecutive_failures >= 3) or consecutive_failures >= 15:
+                        msg = (
+                            f"AI backend failed {consecutive_failures} times in a row "
+                            f"({scored_ok} scored before that) — aborting. "
+                            "Check CLAUDE_CODE_OAUTH_TOKEN / usage limits, then re-run. "
+                            f"Last error: {last_error}"
+                        )
+                        print(f"  ✗ Score-all aborted: {msg}")
+                        await broadcast_event(
+                            {"type": "score_all_error", "data": {"error": msg}}
+                        )
+                        return
 
             await broadcast_event(
                 {"type": "score_all_complete", "data": {"count": len(unscored)}}
@@ -867,7 +891,7 @@ async def apply_single_job(job_id: str, body: dict = {}) -> dict:
             })
 
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=False, slow_mo=100)
+                browser = await p.chromium.launch(headless=not headed_supported(), slow_mo=100)
                 context = await browser.new_context(
                     viewport={"width": 1920, "height": 1080},
                     user_agent=(
@@ -990,7 +1014,7 @@ async def apply_batch(body: dict = {}) -> dict:
             })
 
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=False, slow_mo=100)
+                browser = await p.chromium.launch(headless=not headed_supported(), slow_mo=100)
                 context = await browser.new_context(
                     viewport={"width": 1920, "height": 1080},
                     user_agent=(
@@ -1300,7 +1324,7 @@ async def start_yolo(body: dict = {}) -> dict:
                                 job_row.get("description", "")
                                 or f"Job: {job_row['title']} at {job_row['company']}. Location: {job_row['location']}"
                             )
-                            result = brain.match_job(desc, profile, resume_text=resume_text)
+                            result = await asyncio.to_thread(brain.match_job, desc, profile, resume_text=resume_text)
                             score = result.get("score", 0)
                             log_matched(job_row["id"], score, result.get("reasoning", ""), result.get("cover_letter", ""))
                             if score < min_score:
@@ -1356,7 +1380,7 @@ async def start_yolo(body: dict = {}) -> dict:
                         _apply_state["running"] = True
 
                         async with async_playwright() as p:
-                            browser = await p.chromium.launch(headless=False, slow_mo=100)
+                            browser = await p.chromium.launch(headless=not headed_supported(), slow_mo=100)
                             context = await browser.new_context(
                                 viewport={"width": 1920, "height": 1080},
                                 user_agent=(

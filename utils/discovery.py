@@ -218,7 +218,9 @@ async def discover_all_jobs(profile: dict) -> list[Job]:
         try:
             from utils.jobspy_source import discover_jobspy_jobs
             print(f"\n🔍 Searching job boards via JobSpy...")
-            jobspy_jobs = discover_jobspy_jobs(profile)
+            # Blocking network I/O — off the event loop so the dashboard, WebSocket
+            # feed, and healthcheck stay live during a multi-minute scrape.
+            jobspy_jobs = await asyncio.to_thread(discover_jobspy_jobs, profile)
             all_jobs.extend(jobspy_jobs)
         except Exception as e:
             print(f"  ⚠ JobSpy search failed: {e}")
@@ -227,16 +229,25 @@ async def discover_all_jobs(profile: dict) -> list[Job]:
     try:
         from utils.rss_source import discover_rss_jobs
         print(f"\n📡 Checking RSS feeds...")
-        rss_jobs = discover_rss_jobs(profile)
+        rss_jobs = await asyncio.to_thread(discover_rss_jobs, profile)
         all_jobs.extend(rss_jobs)
     except Exception as e:
         print(f"  ⚠ RSS feeds failed: {e}")
+
+    # Startup & niche boards — YC Jobs, Remotive, Himalayas, Arbeitnow, WWR, web3.career
+    try:
+        from utils.startup_source import discover_startup_jobs
+        print(f"\n🚀 Checking startup & niche boards...")
+        startup_jobs = await asyncio.to_thread(discover_startup_jobs, profile)
+        all_jobs.extend(startup_jobs)
+    except Exception as e:
+        print(f"  ⚠ Startup boards failed: {e}")
 
     # Adzuna API
     try:
         from utils.adzuna_source import discover_adzuna_jobs
         print(f"\n📊 Searching Adzuna...")
-        adzuna_jobs = discover_adzuna_jobs(profile)
+        adzuna_jobs = await asyncio.to_thread(discover_adzuna_jobs, profile)
         all_jobs.extend(adzuna_jobs)
     except Exception as e:
         print(f"  ⚠ Adzuna failed: {e}")
@@ -245,7 +256,7 @@ async def discover_all_jobs(profile: dict) -> list[Job]:
     try:
         from utils.hn_source import discover_hn_jobs
         print(f"\n📰 Checking HN Who is Hiring...")
-        hn_jobs = discover_hn_jobs(profile)
+        hn_jobs = await asyncio.to_thread(discover_hn_jobs, profile)
         all_jobs.extend(hn_jobs)
     except Exception as e:
         print(f"  ⚠ HN Who is Hiring failed: {e}")

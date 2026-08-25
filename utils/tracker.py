@@ -265,10 +265,26 @@ def get_jobs_by_status(status: str) -> list:
 
 
 def get_unscored_jobs() -> list:
-    """Get all jobs that need scoring (discovered with no score)."""
+    """
+    Get all jobs that need scoring (discovered with no score).
+
+    Ordered so the sources most likely to produce matches are scored first —
+    scoring the full backlog takes hours, and this puts probable matches in
+    front of the user early instead of grinding through old low-fit inventory.
+    """
     conn = get_db()
     rows = conn.execute(
-        "SELECT * FROM applications WHERE match_score IS NULL AND status = 'discovered'"
+        """SELECT * FROM applications
+           WHERE match_score IS NULL AND status = 'discovered'
+           ORDER BY CASE
+               WHEN platform IN ('yc_jobs','remotive','himalayas','arbeitnow',
+                                 'weworkremotely','web3career') THEN 0
+               WHEN platform = 'remoteok' THEN 1
+               WHEN platform LIKE 'jobspy%' THEN 2
+               WHEN platform IN ('greenhouse','lever') THEN 3
+               ELSE 4
+           END,
+           discovered_at DESC"""
     ).fetchall()
     conn.close()
     return [dict(row) for row in rows]
