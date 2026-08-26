@@ -630,6 +630,12 @@ def _save_resume_meta(meta: dict):
 
 def _update_profile_resume_path(path: str):
     import yaml
+    # Store relative to the app root: profile.yaml is bind-mounted into Docker,
+    # so an absolute path like /app/resumes/x.pdf would break the host-side CLI.
+    try:
+        path = "./" + str(Path(path).relative_to(usercontext.BASE_DIR))
+    except ValueError:
+        pass
     profile_path = usercontext.profile_path()
     with open(profile_path) as f:
         profile = yaml.safe_load(f)
@@ -663,18 +669,20 @@ async def upload_resume(file: UploadFile = File(...), name: str = Form(...)) -> 
     with open(dest, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    is_first = len(meta) == 0
+    # Re-uploading under an existing name (e.g. the wizard's "Replace File")
+    # must keep that entry's default status instead of dropping it.
+    is_default = len(meta) == 0 or meta.get(safe_name, {}).get("is_default", False)
     meta[safe_name] = {
         "filename": filename,
         "original_name": file.filename,
-        "is_default": is_first,
+        "is_default": is_default,
     }
     _save_resume_meta(meta)
 
-    if is_first:
+    if is_default:
         _update_profile_resume_path(str(dest))
 
-    return {"name": safe_name, "filename": filename, "is_default": is_first}
+    return {"name": safe_name, "filename": filename, "is_default": is_default}
 
 
 @app.delete("/api/resumes/{name}")

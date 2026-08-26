@@ -162,6 +162,9 @@ function pipeline() {
     wizardNewLocation: "",
     wizardNewSkill: "",
     wizardNewQuery: "",
+    wizardResumeState: "", // "" | "uploading" | "success" | "error"
+    wizardResumeFilename: "",
+    wizardResumeError: "",
 
     // ----- Filters -----
     filters: {
@@ -418,6 +421,35 @@ function pipeline() {
 
     wizardRemoveQuery(i) {
       this.wizardData.search.queries.splice(i, 1);
+    },
+
+    async wizardUploadResume(file) {
+      if (!file) return;
+      const isPdf =
+        file.type === "application/pdf" || /\.pdf$/i.test(file.name);
+      if (!isPdf) {
+        this.wizardResumeState = "error";
+        this.wizardResumeError = "Only PDF files are supported.";
+        return;
+      }
+      this.wizardResumeState = "uploading";
+      this.wizardResumeFilename = file.name;
+      this.wizardResumeError = "";
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        fd.append("name", "Default");
+        const res = await fetch("/api/resumes", { method: "POST", body: fd });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.detail || `Server returned ${res.status}`);
+        }
+        this.wizardResumeState = "success";
+        await this.loadResumes();
+      } catch (err) {
+        this.wizardResumeState = "error";
+        this.wizardResumeError = err.message || "Upload failed";
+      }
     },
 
     async wizardSubmit() {
@@ -1776,11 +1808,12 @@ function pipeline() {
         fd.append("name", this.newResumeName.trim());
         const res = await fetch("/api/resumes", { method: "POST", body: fd });
         if (!res.ok) throw new Error(await res.text());
+        const uploadedName = this.newResumeName.trim();
         this.newResumeName = "";
         fileInput.value = "";
         await this.loadResumes();
-        this.notify("Resume uploaded.", "success");
-        this.addFeedItem("Resume uploaded: " + this.newResumeName, "#3b82f6");
+        this.notify(`Resume "${uploadedName}" uploaded.`, "success");
+        this.addFeedItem("Resume uploaded: " + uploadedName, "#3b82f6");
       } catch (err) {
         this.notify("Upload failed: " + err.message, "error");
       } finally {
