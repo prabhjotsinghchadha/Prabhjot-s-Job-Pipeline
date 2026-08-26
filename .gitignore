@@ -43,5 +43,3 @@ profile.yaml
 # Screenshots (may contain PII from live sessions)
 *.png
 
-# Broken empty directory
-{adapters,utils}/
