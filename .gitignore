@@ -43,3 +43,6 @@ profile.yaml
 # Screenshots (may contain PII from live sessions)
 *.png
 
+
+# Node (Railway IaC SDK only)
+node_modules/

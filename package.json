@@ -1,0 +1,8 @@
+{
+  "name": "mr-jobs",
+  "private": true,
+  "description": "Dev dependencies for Railway IaC (.railway/railway.ts)",
+  "devDependencies": {
+    "railway": "^3.11.0"
+  }
+}

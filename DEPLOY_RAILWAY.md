@@ -5,7 +5,9 @@ volume. Total setup is ~10 minutes.
 
 ## How it fits together
 
-- Railway builds the existing `Dockerfile` (config in `railway.toml`).
+- Railway builds the existing `Dockerfile` (service config in
+  `.railway/railway.ts`, applied with `railway config plan` / `apply`;
+  requires `npm install` at the repo root for the `railway` SDK).
 - Railway injects `PORT`; the entrypoint honors it.
 - A volume mounted at `/data` holds everything mutable: `applications.db`,
   `profile.yaml`, `.cache/`, `resumes/`. Setting `DATA_DIR=/data` makes the
