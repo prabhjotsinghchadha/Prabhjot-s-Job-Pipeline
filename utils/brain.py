@@ -18,8 +18,9 @@ import hashlib
 from pathlib import Path
 from typing import Optional
 
-CACHE_DIR = Path(__file__).parent.parent / ".cache"
-CACHE_DIR.mkdir(exist_ok=True)
+def CACHE_DIR_FN():
+    from utils.usercontext import cache_dir
+    return cache_dir()
 
 
 class ClaudeBrain:
@@ -138,7 +139,7 @@ class ClaudeBrain:
         if cache_key is None:
             cache_key = hashlib.md5(prompt.encode()).hexdigest()
 
-        cache_file = CACHE_DIR / f"{cache_key}.txt"
+        cache_file = CACHE_DIR_FN() / f"{cache_key}.txt"
         if cache_file.exists():
             if self.verbose:
                 print(f"  💾 Cache hit: {cache_key}")

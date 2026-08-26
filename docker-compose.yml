@@ -19,4 +19,9 @@ services:
       # Required when hosting anywhere reachable from outside this machine.
       - DASHBOARD_USER=${DASHBOARD_USER:-admin}
       - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:-}
+      # Multi-tenant mode (Firebase Auth). All blank = single-user mode.
+      # See DEPLOY_RAILWAY.md "Multi-tenant mode" for setup.
+      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID:-}
+      - FIREBASE_WEB_CONFIG=${FIREBASE_WEB_CONFIG:-}
+      - ALLOWED_EMAILS=${ALLOWED_EMAILS:-}
     restart: unless-stopped

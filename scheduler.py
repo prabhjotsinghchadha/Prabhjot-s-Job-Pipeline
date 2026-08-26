@@ -1,6 +1,13 @@
 """
 Background scheduler — Runs discovery and scoring on configurable intervals.
 Integrates with FastAPI server lifecycle via setup_scheduler() -> deferred start.
+
+Multi-tenant mode: each scheduled job iterates every registered user
+sequentially, binding the user's context so all data access (DB, profile,
+resumes, cache) lands in that user's own directory. Sequential on purpose —
+all tenants share one egress IP, and job boards must see one polite client.
+
+Legacy mode: behaves exactly as before — one user, one profile.yaml.
 """
 
 import asyncio
@@ -9,22 +16,53 @@ from pathlib import Path
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
+from utils import usercontext
+
 scheduler = AsyncIOScheduler()
-_last_results = {"discover": None, "score": None}
+# Keyed by uid so one tenant's run summary is never shown to another.
+_last_results: dict = {}
 _configured = False
 
 
+def _results() -> dict:
+    """Per-user slot in _last_results for the current context."""
+    uid = usercontext.current_uid()
+    return _last_results.setdefault(uid, {"discover": None, "score": None})
+
+
 def get_profile():
-    """Load profile.yaml. Returns None if missing."""
-    path = Path(__file__).parent / "profile.yaml"
+    """Load the current user's profile. Returns None if missing."""
+    path = usercontext.profile_path()
     if not path.exists():
         return None
     with open(path) as f:
         return yaml.safe_load(f)
 
 
-async def scheduled_discover():
-    """Discover new jobs from all sources."""
+async def _for_each_user(fn) -> None:
+    """
+    Run fn() once per registered user (multi-tenant) or once as the local
+    user (legacy). One user's failure never blocks the others.
+    """
+    if not usercontext.multi_tenant_enabled():
+        await fn()
+        return
+    for uid, info in usercontext.list_users().items():
+        token = usercontext.set_current_user({
+            "uid": uid,
+            "email": info.get("email", ""),
+            "name": info.get("name", ""),
+        })
+        try:
+            await fn()
+        except Exception as e:
+            print(f"[Scheduler] {fn.__name__} failed for user {uid}: {e}")
+        finally:
+            usercontext.reset_current_user(token)
+
+
+async def _discover_for_current_user():
+    """Discover new jobs from all sources for the bound user."""
     try:
         from utils.discovery import discover_all_jobs
         from utils.tracker import is_already_seen, log_discovered
@@ -51,7 +89,7 @@ async def scheduled_discover():
 
         await discover_all_jobs(profile, on_source_jobs=on_source_jobs)
 
-        _last_results["discover"] = {
+        _results()["discover"] = {
             "total": counts["total"],
             "new": counts["new"],
             "timestamp": __import__("datetime").datetime.now().isoformat()
@@ -59,11 +97,11 @@ async def scheduled_discover():
         print(f"[Scheduler] Discovery complete: {counts['new']} new jobs from {counts['total']} total")
     except Exception as e:
         print(f"[Scheduler] Discovery failed: {e}")
-        _last_results["discover"] = {"error": str(e)}
+        _results()["discover"] = {"error": str(e)}
 
 
-async def scheduled_score():
-    """Score all unscored jobs."""
+async def _score_for_current_user():
+    """Score all unscored jobs for the bound user."""
     try:
         from utils.tracker import get_unscored_jobs, log_matched, log_skipped
         from utils.brain import ClaudeBrain
@@ -93,23 +131,25 @@ async def scheduled_score():
             except Exception:
                 pass
 
-        _last_results["score"] = {
+        _results()["score"] = {
             "scored": scored,
             "timestamp": __import__("datetime").datetime.now().isoformat()
         }
         print(f"[Scheduler] Scored {scored} jobs")
     except Exception as e:
         print(f"[Scheduler] Scoring failed: {e}")
-        _last_results["score"] = {"error": str(e)}
+        _results()["score"] = {"error": str(e)}
 
 
-async def scheduled_email_check():
-    """Check email for application status updates."""
+async def _email_check_for_current_user():
+    """Check email for application status updates, if this user enabled it."""
     try:
         from utils.email_checker import check_emails
         profile = get_profile()
+        if profile is None or not profile.get("email", {}).get("enabled", False):
+            return
         results = check_emails(profile)
-        _last_results["email"] = {
+        _results()["email"] = {
             "checked": len(results),
             "timestamp": __import__("datetime").datetime.now().isoformat()
         }
@@ -117,7 +157,7 @@ async def scheduled_email_check():
         print(f"[Scheduler] Email check failed: {e}")
 
 
-async def scheduled_follow_up_check():
+async def _follow_up_check_for_current_user():
     """Check for overdue follow-ups and log count."""
     try:
         from utils.tracker import get_overdue_follow_ups, get_ghost_alerts
@@ -125,7 +165,7 @@ async def scheduled_follow_up_check():
         ghosts = get_ghost_alerts(days=14)
         if overdue or ghosts:
             print(f"[Scheduler] Follow-up check: {len(overdue)} overdue, {len(ghosts)} ghosts")
-        _last_results["follow_up"] = {
+        _results()["follow_up"] = {
             "overdue": len(overdue),
             "ghosts": len(ghosts),
             "timestamp": __import__("datetime").datetime.now().isoformat()
@@ -134,24 +174,45 @@ async def scheduled_follow_up_check():
         print(f"[Scheduler] Follow-up check failed: {e}")
 
 
+async def scheduled_discover():
+    await _for_each_user(_discover_for_current_user)
+
+
+async def scheduled_score():
+    await _for_each_user(_score_for_current_user)
+
+
+async def scheduled_email_check():
+    await _for_each_user(_email_check_for_current_user)
+
+
+async def scheduled_follow_up_check():
+    await _for_each_user(_follow_up_check_for_current_user)
+
+
 def setup_scheduler():
     """
     Configure scheduler jobs (but don't start yet).
     Call start_scheduler() after the event loop is running (e.g., in FastAPI lifespan).
     """
     global _configured
-    profile = get_profile()
-    if profile is None:
-        print("[Scheduler] No profile.yaml found — skipping scheduler setup (waiting for wizard)")
-        return
-    schedule_config = profile.get("schedule", {})
 
-    if not schedule_config.get("enabled", True):
-        print("[Scheduler] Disabled in profile.yaml")
-        return
-
-    discover_hours = schedule_config.get("discover_interval_hours", 6)
-    score_minutes = schedule_config.get("score_interval_minutes", 30)
+    if usercontext.multi_tenant_enabled():
+        # No single profile to read intervals from — platform defaults.
+        discover_hours, score_minutes = 6, 30
+        email_enabled = True  # Per-user opt-in is checked inside the job
+    else:
+        profile = get_profile()
+        if profile is None:
+            print("[Scheduler] No profile.yaml found — skipping scheduler setup (waiting for wizard)")
+            return
+        schedule_config = profile.get("schedule", {})
+        if not schedule_config.get("enabled", True):
+            print("[Scheduler] Disabled in profile.yaml")
+            return
+        discover_hours = schedule_config.get("discover_interval_hours", 6)
+        score_minutes = schedule_config.get("score_interval_minutes", 30)
+        email_enabled = profile.get("email", {}).get("enabled", False)
 
     scheduler.add_job(
         scheduled_discover,
@@ -169,13 +230,10 @@ def setup_scheduler():
         replace_existing=True
     )
 
-    # Also check email if configured
-    email_config = profile.get("email", {})
-    if email_config.get("enabled", False):
-        email_hours = email_config.get("check_interval_hours", 12)
+    if email_enabled:
         scheduler.add_job(
             scheduled_email_check,
-            trigger=IntervalTrigger(hours=email_hours),
+            trigger=IntervalTrigger(hours=12),
             id="email",
             name="Email Check",
             replace_existing=True
@@ -209,7 +267,7 @@ def stop_scheduler():
 
 
 def get_scheduler_status() -> dict:
-    """Get current scheduler status for the dashboard."""
+    """Scheduler status for the dashboard — last results scoped to the caller."""
     jobs_info = []
     try:
         for job in scheduler.get_jobs():
@@ -223,5 +281,5 @@ def get_scheduler_status() -> dict:
     return {
         "running": scheduler.running if hasattr(scheduler, 'running') else False,
         "jobs": jobs_info,
-        "last_results": _last_results
+        "last_results": _results(),
     }

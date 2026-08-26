@@ -57,6 +57,61 @@ upload your resume in the dashboard, then hit Discover.
 - The scheduler keeps the process warm (discovery every 6 h, scoring every
   30 m), so do not enable Railway's App Sleeping for this service.
 
+## Multi-tenant mode (Firebase Auth)
+
+Setting `FIREBASE_PROJECT_ID` switches the app from single-user to
+multi-tenant: each person signs in with Firebase (email/password or
+Google), and gets their **own** data directory under `/data/users/<uid>/`
+— own profile, own job pipeline, own resumes. Isolation is by
+construction: users have physically separate SQLite databases, and every
+API request and WebSocket connection is scoped to the verified user.
+
+### One-time Firebase setup (in console.firebase.google.com)
+
+1. Create a project (e.g. `mr-jobs`). Google Analytics not needed.
+2. **Authentication → Sign-in method**: enable **Email/Password** and
+   (recommended) **Google**.
+3. **Authentication → Settings → Authorized domains**: add your Railway
+   domain (e.g. `mr-jobs-production.up.railway.app`).
+4. **Project settings → General → Your apps → Add app → Web**: register a
+   web app (no hosting needed) and copy the `firebaseConfig` object.
+
+### Railway variables
+
+```bash
+railway variables \
+  --set "FIREBASE_PROJECT_ID=<your-project-id>" \
+  --set 'FIREBASE_WEB_CONFIG={"apiKey":"...","authDomain":"...","projectId":"...","appId":"..."}' \
+  --set "ALLOWED_EMAILS=you@gmail.com,friend1@gmail.com,friend2@gmail.com"
+```
+
+- `FIREBASE_WEB_CONFIG` is the config object from step 4 as one JSON line.
+  These values are public by design — access control comes from token
+  verification plus the allowlist, not from hiding them.
+- `ALLOWED_EMAILS` keeps the deployment friends-only: anyone can create a
+  Firebase account, but only allowlisted emails pass the server. Leave it
+  unset to admit any account in your Firebase project (not recommended).
+- `DASHBOARD_PASSWORD` is ignored in this mode — remove it if you like.
+
+Redeploy (`railway up`) and the dashboard shows a sign-in screen; each
+user runs their own setup wizard on first login.
+
+### Multi-tenant caveats
+
+- **Scoring bills the operator**: every user's scoring runs on the
+  server's `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` and counts
+  against its limits. Fine for a few friends; revisit before going wider.
+- **Shared egress IP**: all users' scraping leaves from one Railway IP —
+  the scheduler runs users sequentially to stay polite, but heavy use
+  still risks job-board throttling for everyone.
+- **Scheduler intervals are platform defaults** (discovery 6 h, scoring
+  30 m per user) — per-user schedule settings in the profile are not yet
+  honored in this mode.
+- Existing single-user data is not auto-migrated into a user account; the
+  `/data/applications.db` from single-user mode sits unused. Copy it into
+  `/data/users/<uid>/applications.db` (find your uid in `/data/users.json`
+  after first login) if you want your history.
+
 ## Caveats
 
 - **Datacenter IP**: Indeed/LinkedIn/Glassdoor throttle cloud IPs harder

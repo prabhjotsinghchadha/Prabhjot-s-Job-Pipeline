@@ -11,6 +11,15 @@
 
 function pipeline() {
   return {
+    // ----- Auth (multi-tenant via Firebase; legacy modes skip all of this) -----
+    authMode: "none", // "none" | "basic" | "firebase"
+    authedUser: null, // signed-in email when authMode === "firebase"
+    loginEmail: "",
+    loginPassword: "",
+    loginError: "",
+    loginBusy: false,
+    _appStarted: false,
+
     // ----- Core State -----
     jobs: [],
     totalJobs: 0,
@@ -195,9 +204,130 @@ function pipeline() {
     // ===================================================================
 
     async init() {
+      await this.initAuth();
+      // In Firebase mode the login overlay owns the screen until sign-in;
+      // onAuthStateChanged calls startApp() once a user is present.
+      if (this.authMode === "firebase") return;
+      await this.startApp();
+    },
+
+    // ===================================================================
+    // AUTH (Firebase multi-tenant mode)
+    // ===================================================================
+
+    async initAuth() {
+      try {
+        const cfg = await (await fetch("/api/config")).json();
+        this.authMode = cfg.auth || "none";
+        if (this.authMode !== "firebase") return;
+        await this._loadScript(
+          "https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js",
+        );
+        await this._loadScript(
+          "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js",
+        );
+        firebase.initializeApp(cfg.firebase);
+        this._installFetchAuth();
+        firebase.auth().onAuthStateChanged((user) => {
+          if (user) {
+            this.authedUser = user.email || user.displayName || "user";
+            this.loginError = "";
+            if (!this._appStarted) {
+              this._appStarted = true;
+              this.startApp();
+            }
+          } else {
+            this.authedUser = null;
+            if (this._appStarted) location.reload(); // Clean slate on logout
+          }
+        });
+      } catch (e) {
+        console.error("Auth bootstrap failed:", e);
+        this.authMode = "none";
+      }
+    },
+
+    _loadScript(src) {
+      return new Promise((resolve, reject) => {
+        const s = document.createElement("script");
+        s.src = src;
+        s.onload = resolve;
+        s.onerror = () => reject(new Error(`Failed to load ${src}`));
+        document.head.appendChild(s);
+      });
+    },
+
+    _installFetchAuth() {
+      // Attach a fresh Firebase ID token to every same-origin API call.
+      // getIdToken() returns the cached token until near expiry, then
+      // refreshes — so hour-long sessions keep working.
+      const orig = window.fetch.bind(window);
+      window.fetch = async (input, init = {}) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url.startsWith("/api/") && firebase.auth().currentUser) {
+          const token = await firebase.auth().currentUser.getIdToken();
+          init.headers = {
+            ...(init.headers || {}),
+            Authorization: `Bearer ${token}`,
+          };
+        }
+        return orig(input, init);
+      };
+    },
+
+    async loginWithEmail(create = false) {
+      this.loginBusy = true;
+      this.loginError = "";
+      try {
+        const auth = firebase.auth();
+        if (create) {
+          await auth.createUserWithEmailAndPassword(
+            this.loginEmail,
+            this.loginPassword,
+          );
+        } else {
+          await auth.signInWithEmailAndPassword(
+            this.loginEmail,
+            this.loginPassword,
+          );
+        }
+      } catch (e) {
+        this.loginError = e.message || "Sign-in failed";
+      } finally {
+        this.loginBusy = false;
+      }
+    },
+
+    async loginWithGoogle() {
+      this.loginBusy = true;
+      this.loginError = "";
+      try {
+        await firebase
+          .auth()
+          .signInWithPopup(new firebase.auth.GoogleAuthProvider());
+      } catch (e) {
+        this.loginError = e.message || "Google sign-in failed";
+      } finally {
+        this.loginBusy = false;
+      }
+    },
+
+    async logout() {
+      if (this.authMode === "firebase") await firebase.auth().signOut();
+    },
+
+    async startApp() {
       // Check if first-run setup is needed
       try {
         const res = await fetch("/api/profile");
+        if (res.status === 401 && this.authMode === "firebase") {
+          // Signed in to Firebase but rejected by the server (allowlist).
+          const body = await res.json().catch(() => ({}));
+          this._appStarted = false;
+          this.loginError = body.detail || "This account is not allowed here.";
+          await firebase.auth().signOut();
+          return;
+        }
         const data = await res.json();
         if (data.needs_setup) {
           this.needsSetup = true;
@@ -1074,7 +1204,13 @@ function pipeline() {
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
       this.ws = new WebSocket(`${proto}//${location.host}/ws`);
 
-      this.ws.onopen = () => {
+      this.ws.onopen = async () => {
+        // Firebase mode: the server requires an auth handshake as the
+        // first message before it will deliver this user's events.
+        if (this.authMode === "firebase" && firebase.auth().currentUser) {
+          const token = await firebase.auth().currentUser.getIdToken();
+          this.ws.send(JSON.stringify({ type: "auth", token }));
+        }
         this.wsConnected = true;
         this._wsReconnectDelay = 1000;
         this._wsReconnecting = false;

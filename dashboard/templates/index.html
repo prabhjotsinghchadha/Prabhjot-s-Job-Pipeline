@@ -30,6 +30,53 @@
 <body x-data="pipeline()" x-init="init()" x-cloak>
 
     <!-- ===================================================================
+         SIGN-IN (multi-tenant mode only — Firebase Auth)
+    ==================================================================== -->
+    <div x-show="authMode === 'firebase' && !authedUser" x-cloak
+         class="fixed inset-0 z-[110] bg-[#0a0e17] flex items-center justify-center">
+      <div class="w-full max-w-sm mx-4">
+        <div class="text-center mb-8">
+          <div class="inline-flex items-center gap-3 mb-3">
+            <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-white text-xl font-bold">MR</div>
+          </div>
+          <h1 class="text-xl font-bold text-white" style="font-family:var(--font-display)">Prabhjot's Pipeline</h1>
+          <p class="text-[0.65rem] font-mono tracking-[0.15em] uppercase text-[#64748b] mt-1">Sign in to your pipeline</p>
+        </div>
+
+        <div class="bg-[#111827] border border-[#1e293b] rounded-xl p-6 space-y-3">
+          <input type="email" x-model="loginEmail" placeholder="Email"
+                 @keydown.enter="loginWithEmail()"
+                 class="w-full bg-[#0a0e17] border border-[#1e293b] rounded-md px-3 py-2 text-sm text-white placeholder-[#475569] focus:border-cyan-500 focus:outline-none" />
+          <input type="password" x-model="loginPassword" placeholder="Password"
+                 @keydown.enter="loginWithEmail()"
+                 class="w-full bg-[#0a0e17] border border-[#1e293b] rounded-md px-3 py-2 text-sm text-white placeholder-[#475569] focus:border-cyan-500 focus:outline-none" />
+
+          <button @click="loginWithEmail()" :disabled="loginBusy"
+                  class="w-full bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 disabled:opacity-50 text-white text-sm font-semibold rounded-md py-2 transition"
+                  x-text="loginBusy ? 'Signing in...' : 'Sign In'"></button>
+          <button @click="loginWithEmail(true)" :disabled="loginBusy"
+                  class="w-full bg-[#0a0e17] border border-[#1e293b] hover:border-cyan-600 disabled:opacity-50 text-[#94a3b8] text-sm rounded-md py-2 transition">
+            Create Account
+          </button>
+
+          <div class="flex items-center gap-3 py-1">
+            <div class="flex-1 h-px bg-[#1e293b]"></div>
+            <span class="text-[0.6rem] font-mono uppercase text-[#475569]">or</span>
+            <div class="flex-1 h-px bg-[#1e293b]"></div>
+          </div>
+
+          <button @click="loginWithGoogle()" :disabled="loginBusy"
+                  class="w-full bg-white hover:bg-gray-100 disabled:opacity-50 text-gray-800 text-sm font-medium rounded-md py-2 transition">
+            Continue with Google
+          </button>
+
+          <p x-show="loginError" x-text="loginError" x-cloak
+             class="text-rose-400 text-xs pt-1"></p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================================================================
          FIRST-RUN SETUP WIZARD
     ==================================================================== -->
     <div x-show="needsSetup" x-cloak class="fixed inset-0 z-[100] bg-[#0a0e17] flex items-center justify-center">
@@ -275,6 +322,11 @@
                             :class="currentView === 'dashboard' ? 'active' : ''">DASHBOARD</button>
                     <button @click="switchView('profile')" class="nav-tab"
                             :class="currentView === 'profile' ? 'active' : ''">PROFILE</button>
+                </div>
+                <div class="flex items-center gap-2 mr-3 pr-3 border-r border-[#1e293b]"
+                     x-show="authMode === 'firebase' && authedUser" x-cloak>
+                    <span class="text-[0.62rem] font-mono text-[#64748b]" x-text="authedUser"></span>
+                    <button @click="logout()" class="nav-tab">LOGOUT</button>
                 </div>
                 <button @click="scoreAll()" :disabled="scoring" class="cmd-btn secondary"
                         x-text="scoring ? '> SCORING...' : '> SCORE ALL'"></button>

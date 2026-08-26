@@ -9,6 +9,10 @@ import json
 from datetime import datetime, date
 from pathlib import Path
 
+from utils.usercontext import db_path as _user_db_path
+
+# Legacy constant kept for external references; in multi-tenant mode the
+# actual path comes from the current user's context at connect time.
 DB_PATH = Path(__file__).parent.parent / "applications.db"
 
 # All valid statuses
@@ -19,7 +23,7 @@ VALID_STATUSES = [
 
 
 def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(_user_db_path())
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")

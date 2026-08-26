@@ -51,8 +51,14 @@ from utils.tracker import (
 from utils.events import EventBus
 
 BASE_DIR = Path(__file__).parent
-RESUMES_DIR = BASE_DIR.parent / "resumes"
-RESUMES_META = RESUMES_DIR / "meta.json"
+def _resumes_dir() -> Path:
+    """Per-user resumes directory (repo-root resumes/ in legacy mode)."""
+    from utils.usercontext import resumes_dir
+    return resumes_dir()
+
+
+def _resumes_meta() -> Path:
+    return _resumes_dir() / "meta.json"
 
 
 from contextlib import asynccontextmanager
@@ -77,23 +83,29 @@ app = FastAPI(title="Prabhjot's Pipeline", version="1.0.0", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
-# Authentication — HTTP Basic, enabled by setting DASHBOARD_PASSWORD.
+# Authentication — two modes:
 #
-# The dashboard was designed for loopback-only use; when it is hosted
-# somewhere reachable (Railway, a VPS, a tunnel) it MUST NOT be open to the
-# world: it exposes the profile, resume, and application actions. With
-# DASHBOARD_PASSWORD unset, behavior is unchanged (no auth, local use).
+#   Firebase (FIREBASE_PROJECT_ID set): multi-tenant. The frontend signs in
+#     with the Firebase JS SDK and sends `Authorization: Bearer <id-token>`
+#     on every request. Each verified user is bound to the request context,
+#     which routes all data access to their own data directory.
+#
+#   Legacy: single-user. Optional HTTP Basic auth via DASHBOARD_PASSWORD
+#     (required whenever hosted anywhere reachable); unset = open, local use.
 # ---------------------------------------------------------------------------
 import os
 import secrets as _secrets
 
-from fastapi.responses import Response
+from fastapi.responses import Response, JSONResponse
+
+from utils import usercontext
+from utils.usercontext import multi_tenant_enabled
 
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "admin")
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 
 # Reachable without credentials so container/platform healthchecks pass.
-_AUTH_EXEMPT_PATHS = {"/api/health"}
+_AUTH_EXEMPT_PATHS = {"/api/health", "/api/config"}
 
 
 def _basic_auth_ok(auth_header: Optional[str]) -> bool:
@@ -111,9 +123,42 @@ def _basic_auth_ok(auth_header: Optional[str]) -> bool:
     return user_ok and pass_ok
 
 
+def _resolve_firebase_user(auth_header: Optional[str]) -> dict:
+    """Verify the Bearer token and return the user. Raises AuthError."""
+    from utils.auth import verify_firebase_token, AuthError
+
+    if not auth_header or not auth_header.lower().startswith("bearer "):
+        raise AuthError("Missing bearer token")
+    return verify_firebase_token(auth_header.split(" ", 1)[1])
+
+
 @app.middleware("http")
-async def _basic_auth_middleware(request: Request, call_next):
-    if DASHBOARD_PASSWORD and request.url.path not in _AUTH_EXEMPT_PATHS:
+async def _auth_middleware(request: Request, call_next):
+    path = request.url.path
+
+    if multi_tenant_enabled():
+        # The page shell, static assets, and config load before login;
+        # they contain no user data. Every data route requires a token.
+        if (
+            path in _AUTH_EXEMPT_PATHS
+            or path == "/"
+            or path.startswith("/static/")
+        ):
+            return await call_next(request)
+        from utils.auth import AuthError
+        try:
+            user = _resolve_firebase_user(request.headers.get("authorization"))
+        except AuthError as e:
+            return JSONResponse({"detail": str(e)}, status_code=401)
+        usercontext.register_user(user["uid"], user["email"], user["name"])
+        token = usercontext.set_current_user(user)
+        try:
+            return await call_next(request)
+        finally:
+            usercontext.reset_current_user(token)
+
+    # Legacy single-user mode
+    if DASHBOARD_PASSWORD and path not in _AUTH_EXEMPT_PATHS:
         if not _basic_auth_ok(request.headers.get("authorization")):
             return Response(
                 status_code=401,
@@ -122,10 +167,31 @@ async def _basic_auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+@app.get("/api/config")
+async def auth_config() -> dict:
+    """
+    Public bootstrap config for the frontend (pre-auth). Firebase web config
+    values are public by design — security comes from token verification
+    and the server-side allowlist, not from hiding these.
+    """
+    if multi_tenant_enabled():
+        firebase_config = {}
+        raw = os.environ.get("FIREBASE_WEB_CONFIG", "")
+        if raw:
+            try:
+                firebase_config = json.loads(raw)
+            except ValueError:
+                logger.error("FIREBASE_WEB_CONFIG is not valid JSON")
+        return {"auth": "firebase", "firebase": firebase_config}
+    return {"auth": "basic" if DASHBOARD_PASSWORD else "none"}
+
+
 @app.get("/api/health")
 async def health() -> dict:
-    """Health check for Docker and monitoring."""
-    return {"status": "ok", "profile": Path("profile.yaml").exists()}
+    """Health check for Docker and monitoring. Pre-auth: no per-user data."""
+    if multi_tenant_enabled():
+        return {"status": "ok"}
+    return {"status": "ok", "profile": usercontext.profile_path().exists()}
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +207,10 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 # ---------------------------------------------------------------------------
 # WebSocket connection registry
 # ---------------------------------------------------------------------------
-ws_clients: list[WebSocket] = []
+# Connected dashboard tabs. In multi-tenant mode each socket is bound to the
+# authenticated user's uid and only receives that user's events; in legacy
+# mode the uid is LEGACY_UID and every event reaches every tab as before.
+ws_clients: dict[WebSocket, str] = {}
 
 
 def _json_safe(obj):
@@ -159,11 +228,22 @@ def _json_safe(obj):
 
 async def broadcast_event(event: dict) -> None:
     """
-    Send a JSON event to every connected WebSocket client.
+    Send a JSON event to connected WebSocket clients.
+
+    Multi-tenant: the event's "uid" (stamped by EventBus, or bound here from
+    the current context) selects which user's tabs receive it — never all.
+    Legacy: every tab gets every event, as before.
 
     Dead connections are collected and removed after each broadcast
     to avoid growing the registry with stale entries.
     """
+    target_uid = event.pop("uid", None)
+    if multi_tenant_enabled() and target_uid is None:
+        try:
+            target_uid = usercontext.current_uid()
+        except Exception:
+            target_uid = None  # No owner — deliver to nobody rather than leak
+
     # Pre-serialize to catch any JSON issues before sending
     try:
         payload = json.dumps(event, default=_json_safe)
@@ -176,14 +256,15 @@ async def broadcast_event(event: dict) -> None:
         })
 
     dead: list[WebSocket] = []
-    for ws in ws_clients:
+    for ws, ws_uid in list(ws_clients.items()):
+        if multi_tenant_enabled() and ws_uid != target_uid:
+            continue
         try:
             await ws.send_text(payload)
         except Exception:
             dead.append(ws)
     for ws in dead:
-        if ws in ws_clients:
-            ws_clients.remove(ws)
+        ws_clients.pop(ws, None)
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +500,7 @@ async def dismiss_follow_up_endpoint(job_id: str) -> dict:
 async def get_profile() -> dict:
     """Return the current profile.yaml as JSON, or signal setup needed."""
     import yaml
-    profile_path = BASE_DIR.parent / "profile.yaml"
+    profile_path = usercontext.profile_path()
     if not profile_path.exists():
         return {"needs_setup": True}
     with open(profile_path) as f:
@@ -430,7 +511,7 @@ async def get_profile() -> dict:
 async def run_setup(body: dict) -> dict:
     """First-run wizard: create profile.yaml from wizard data."""
     import yaml
-    profile_path = BASE_DIR.parent / "profile.yaml"
+    profile_path = usercontext.profile_path()
     example_path = BASE_DIR.parent / "profile.yaml.example"
 
     # Load defaults from example
@@ -467,7 +548,7 @@ async def run_setup(body: dict) -> dict:
 async def update_profile(body: dict) -> dict:
     """Partially update profile.yaml with recursive deep merge."""
     import yaml
-    profile_path = BASE_DIR.parent / "profile.yaml"
+    profile_path = usercontext.profile_path()
     with open(profile_path) as f:
         profile = yaml.safe_load(f)
 
@@ -502,7 +583,7 @@ async def score_profile_endpoint() -> dict:
     """
     import yaml
 
-    profile_path = BASE_DIR.parent / "profile.yaml"
+    profile_path = usercontext.profile_path()
     with open(profile_path) as f:
         profile = yaml.safe_load(f)
 
@@ -538,18 +619,18 @@ async def score_profile_endpoint() -> dict:
 # ===========================================================================
 
 def _load_resume_meta() -> dict:
-    RESUMES_DIR.mkdir(exist_ok=True)
-    if RESUMES_META.exists():
-        return json.loads(RESUMES_META.read_text())
+    _resumes_dir().mkdir(exist_ok=True)
+    if _resumes_meta().exists():
+        return json.loads(_resumes_meta().read_text())
     return {}
 
 def _save_resume_meta(meta: dict):
-    RESUMES_DIR.mkdir(exist_ok=True)
-    RESUMES_META.write_text(json.dumps(meta, indent=2))
+    _resumes_dir().mkdir(exist_ok=True)
+    _resumes_meta().write_text(json.dumps(meta, indent=2))
 
 def _update_profile_resume_path(path: str):
     import yaml
-    profile_path = BASE_DIR.parent / "profile.yaml"
+    profile_path = usercontext.profile_path()
     with open(profile_path) as f:
         profile = yaml.safe_load(f)
     profile["resume_path"] = path
@@ -562,7 +643,7 @@ async def list_resumes() -> list:
     """List all stored resumes with metadata."""
     meta = _load_resume_meta()
     return [
-        {"name": name, **info, "exists": (RESUMES_DIR / info["filename"]).exists()}
+        {"name": name, **info, "exists": (_resumes_dir() / info["filename"]).exists()}
         for name, info in meta.items()
     ]
 
@@ -570,7 +651,7 @@ async def list_resumes() -> list:
 @app.post("/api/resumes")
 async def upload_resume(file: UploadFile = File(...), name: str = Form(...)) -> dict:
     """Upload a resume PDF with a display name."""
-    RESUMES_DIR.mkdir(exist_ok=True)
+    _resumes_dir().mkdir(exist_ok=True)
     meta = _load_resume_meta()
 
     safe_name = "".join(c for c in name if c.isalnum() or c in " -_").strip()
@@ -578,7 +659,7 @@ async def upload_resume(file: UploadFile = File(...), name: str = Form(...)) -> 
         raise HTTPException(400, "Invalid resume name")
 
     filename = f"{safe_name.replace(' ', '_')}_{file.filename}"
-    dest = RESUMES_DIR / filename
+    dest = _resumes_dir() / filename
     with open(dest, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
@@ -602,7 +683,7 @@ async def delete_resume(name: str) -> dict:
     meta = _load_resume_meta()
     if name not in meta:
         raise HTTPException(404, "Resume not found")
-    filepath = RESUMES_DIR / meta[name]["filename"]
+    filepath = _resumes_dir() / meta[name]["filename"]
     was_default = meta[name].get("is_default", False)
     if filepath.exists():
         filepath.unlink()
@@ -610,7 +691,7 @@ async def delete_resume(name: str) -> dict:
     if was_default and meta:
         first_key = next(iter(meta))
         meta[first_key]["is_default"] = True
-        _update_profile_resume_path(str(RESUMES_DIR / meta[first_key]["filename"]))
+        _update_profile_resume_path(str(_resumes_dir() / meta[first_key]["filename"]))
     _save_resume_meta(meta)
     return {"ok": True}
 
@@ -624,7 +705,7 @@ async def set_default_resume(name: str) -> dict:
     for key in meta:
         meta[key]["is_default"] = (key == name)
     _save_resume_meta(meta)
-    _update_profile_resume_path(str(RESUMES_DIR / meta[name]["filename"]))
+    _update_profile_resume_path(str(_resumes_dir() / meta[name]["filename"]))
     return {"ok": True, "default": name}
 
 
@@ -634,7 +715,7 @@ async def download_resume(name: str):
     meta = _load_resume_meta()
     if name not in meta:
         raise HTTPException(404, "Resume not found")
-    filepath = RESUMES_DIR / meta[name]["filename"]
+    filepath = _resumes_dir() / meta[name]["filename"]
     if not filepath.exists():
         raise HTTPException(404, "File not found on disk")
     return FileResponse(filepath, filename=meta[name].get("original_name", meta[name]["filename"]))
@@ -709,7 +790,7 @@ async def trigger_discover() -> dict:
         return {"status": "already_running"}
     _discovery_running = True
 
-    profile_path = BASE_DIR.parent / "profile.yaml"
+    profile_path = usercontext.profile_path()
     with open(profile_path) as f:
         profile = yaml.safe_load(f)
 
@@ -757,7 +838,7 @@ async def rescore_job(job_id: str) -> dict:
             import yaml
             from utils.brain import ClaudeBrain
 
-            profile_path = BASE_DIR.parent / "profile.yaml"
+            profile_path = usercontext.profile_path()
             with open(profile_path) as f:
                 profile = yaml.safe_load(f)
 
@@ -810,7 +891,7 @@ async def tailor_job(job_id: str) -> dict:
             from utils.resume_parser import extract_resume_text
             from utils.brain import ClaudeBrain
 
-            profile_path = BASE_DIR.parent / "profile.yaml"
+            profile_path = usercontext.profile_path()
             with open(profile_path) as f:
                 profile = yaml.safe_load(f)
 
@@ -861,7 +942,7 @@ async def score_all_unscored() -> dict:
             import yaml
             from utils.brain import ClaudeBrain
 
-            profile_path = BASE_DIR.parent / "profile.yaml"
+            profile_path = usercontext.profile_path()
             with open(profile_path) as f:
                 profile = yaml.safe_load(f)
 
@@ -933,12 +1014,18 @@ async def score_all_unscored() -> dict:
 # ===========================================================================
 
 # Track active apply sessions so we can report status / cancel
-_apply_state = {
-    "running": False,
-    "job_id": None,
-    "progress": [],  # list of {job_id, status, message}
-    "cancel_requested": False,
-}
+# Per-user apply-session state (keyed by uid; one entry total in legacy mode).
+_apply_states: dict = {}
+
+
+def _apply_state() -> dict:
+    uid = usercontext.current_uid()
+    return _apply_states.setdefault(uid, {
+        "running": False,
+        "job_id": None,
+        "progress": [],  # list of {job_id, status, message}
+        "cancel_requested": False,
+    })
 
 
 @app.post("/api/apply/{job_id}")
@@ -954,15 +1041,15 @@ async def apply_single_job(job_id: str, body: dict = {}) -> dict:
         raise HTTPException(status_code=404, detail="Job not found")
     if not job.get("apply_url"):
         raise HTTPException(status_code=400, detail="Job has no apply URL")
-    if _apply_state["running"]:
+    if _apply_state()["running"]:
         raise HTTPException(status_code=409, detail="An apply session is already running")
 
     dry_run = body.get("dry_run", True)
 
     async def _do_apply():
-        _apply_state["running"] = True
-        _apply_state["job_id"] = job_id
-        _apply_state["cancel_requested"] = False
+        _apply_state()["running"] = True
+        _apply_state()["job_id"] = job_id
+        _apply_state()["cancel_requested"] = False
 
         try:
             import yaml
@@ -971,7 +1058,7 @@ async def apply_single_job(job_id: str, body: dict = {}) -> dict:
             from adapters.stagehand_adapter import apply_smart
             from utils.tracker import log_applied
 
-            profile_path = BASE_DIR.parent / "profile.yaml"
+            profile_path = usercontext.profile_path()
             with open(profile_path) as f:
                 profile = yaml.safe_load(f)
 
@@ -1036,8 +1123,8 @@ async def apply_single_job(job_id: str, body: dict = {}) -> dict:
                 "data": {"job_id": job_id, "error": str(exc)}
             })
         finally:
-            _apply_state["running"] = False
-            _apply_state["job_id"] = None
+            _apply_state()["running"] = False
+            _apply_state()["job_id"] = None
 
     asyncio.create_task(_do_apply())
     return {"status": "started", "job_id": job_id, "dry_run": dry_run}
@@ -1053,7 +1140,7 @@ async def apply_batch(body: dict = {}) -> dict:
         max_count — int, max applications this batch (default 10)
         min_score — int, override minimum score (default from profile)
     """
-    if _apply_state["running"]:
+    if _apply_state()["running"]:
         raise HTTPException(status_code=409, detail="An apply session is already running")
 
     dry_run = body.get("dry_run", True)
@@ -1065,7 +1152,7 @@ async def apply_batch(body: dict = {}) -> dict:
     matched_jobs, _ = get_jobs_filtered(status="matched", sort_by="match_score", sort_order="desc", limit=500)
 
     import yaml
-    profile_path = BASE_DIR.parent / "profile.yaml"
+    profile_path = usercontext.profile_path()
     with open(profile_path) as f:
         profile = yaml.safe_load(f)
 
@@ -1092,9 +1179,9 @@ async def apply_batch(body: dict = {}) -> dict:
 
     async def _do_batch():
         import random
-        _apply_state["running"] = True
-        _apply_state["progress"] = []
-        _apply_state["cancel_requested"] = False
+        _apply_state()["running"] = True
+        _apply_state()["progress"] = []
+        _apply_state()["cancel_requested"] = False
 
         try:
             from playwright.async_api import async_playwright
@@ -1125,7 +1212,7 @@ async def apply_batch(body: dict = {}) -> dict:
 
                 applied_count = 0
                 for i, job in enumerate(eligible):
-                    if _apply_state["cancel_requested"]:
+                    if _apply_state()["cancel_requested"]:
                         await broadcast_event({
                             "type": "apply_batch_cancelled",
                             "data": {"applied": applied_count, "cancelled_at": i}
@@ -1133,7 +1220,7 @@ async def apply_batch(body: dict = {}) -> dict:
                         break
 
                     job_id = job["id"]
-                    _apply_state["job_id"] = job_id
+                    _apply_state()["job_id"] = job_id
 
                     await broadcast_event({
                         "type": "apply_progress",
@@ -1165,7 +1252,7 @@ async def apply_batch(body: dict = {}) -> dict:
                             log_applied(job_id, success)
 
                         applied_count += 1
-                        _apply_state["progress"].append({
+                        _apply_state()["progress"].append({
                             "job_id": job_id, "status": "success" if success else "failed",
                             "title": job["title"], "company": job["company"],
                         })
@@ -1173,7 +1260,7 @@ async def apply_batch(body: dict = {}) -> dict:
                     except Exception as exc:
                         if not dry_run:
                             log_applied(job_id, False)
-                        _apply_state["progress"].append({
+                        _apply_state()["progress"].append({
                             "job_id": job_id, "status": "error",
                             "error": str(exc), "title": job["title"],
                             "company": job["company"],
@@ -1196,7 +1283,7 @@ async def apply_batch(body: dict = {}) -> dict:
                     "applied": applied_count,
                     "total": len(eligible),
                     "dry_run": dry_run,
-                    "results": _apply_state["progress"],
+                    "results": _apply_state()["progress"],
                 }
             })
 
@@ -1206,8 +1293,8 @@ async def apply_batch(body: dict = {}) -> dict:
                 "data": {"error": str(exc)}
             })
         finally:
-            _apply_state["running"] = False
-            _apply_state["job_id"] = None
+            _apply_state()["running"] = False
+            _apply_state()["job_id"] = None
 
     asyncio.create_task(_do_batch())
     return {
@@ -1222,18 +1309,18 @@ async def apply_batch(body: dict = {}) -> dict:
 async def apply_status() -> dict:
     """Get the current apply session status."""
     return {
-        "running": _apply_state["running"],
-        "current_job_id": _apply_state["job_id"],
-        "progress": _apply_state["progress"],
+        "running": _apply_state()["running"],
+        "current_job_id": _apply_state()["job_id"],
+        "progress": _apply_state()["progress"],
     }
 
 
 @app.post("/api/apply/cancel")
 async def cancel_apply() -> dict:
     """Request cancellation of the current batch apply."""
-    if not _apply_state["running"]:
+    if not _apply_state()["running"]:
         return {"status": "not_running"}
-    _apply_state["cancel_requested"] = True
+    _apply_state()["cancel_requested"] = True
     return {"status": "cancel_requested"}
 
 
@@ -1296,14 +1383,20 @@ async def resolve_url(job_id: str) -> dict:
 # REST API — YOLO Mode (Fully Autonomous Pipeline)
 # ===========================================================================
 
-_yolo_state = {
-    "running": False,
-    "phase": None,       # "discover" | "score" | "apply" | "waiting"
-    "cancel_requested": False,
-    "log": [],           # Full action log
-    "cycle": 0,          # Which cycle we're on
-    "continuous": False,  # Keep looping?
-}
+# Per-user YOLO state (keyed by uid; one entry total in legacy mode).
+_yolo_states: dict = {}
+
+
+def _yolo_state() -> dict:
+    uid = usercontext.current_uid()
+    return _yolo_states.setdefault(uid, {
+        "running": False,
+        "phase": None,       # "discover" | "score" | "apply" | "waiting"
+        "cancel_requested": False,
+        "log": [],           # Full action log
+        "cycle": 0,          # Which cycle we're on
+        "continuous": False,  # Keep looping?
+    })
 
 
 @app.post("/api/yolo")
@@ -1318,9 +1411,9 @@ async def start_yolo(body: dict = {}) -> dict:
         max_apply    — int, max applications per cycle (default 10).
         min_score    — int, override minimum score threshold.
     """
-    if _yolo_state["running"]:
+    if _yolo_state()["running"]:
         raise HTTPException(status_code=409, detail="YOLO mode already running")
-    if _apply_state["running"]:
+    if _apply_state()["running"]:
         raise HTTPException(status_code=409, detail="An apply session is already running")
 
     dry_run = body.get("dry_run", True)
@@ -1333,11 +1426,11 @@ async def start_yolo(body: dict = {}) -> dict:
         import random
         import yaml
 
-        _yolo_state["running"] = True
-        _yolo_state["cancel_requested"] = False
-        _yolo_state["continuous"] = continuous
-        _yolo_state["log"] = []
-        _yolo_state["cycle"] = 0
+        _yolo_state()["running"] = True
+        _yolo_state()["cancel_requested"] = False
+        _yolo_state()["continuous"] = continuous
+        _yolo_state()["log"] = []
+        _yolo_state()["cycle"] = 0
 
         def ylog(msg, level="info"):
             """Append to YOLO action log and broadcast."""
@@ -1345,22 +1438,22 @@ async def start_yolo(body: dict = {}) -> dict:
                 "time": __import__("datetime").datetime.now().isoformat(),
                 "msg": msg,
                 "level": level,
-                "cycle": _yolo_state["cycle"],
+                "cycle": _yolo_state()["cycle"],
             }
-            _yolo_state["log"].append(entry)
+            _yolo_state()["log"].append(entry)
             # Keep log bounded
-            if len(_yolo_state["log"]) > 500:
-                _yolo_state["log"] = _yolo_state["log"][-500:]
+            if len(_yolo_state()["log"]) > 500:
+                _yolo_state()["log"] = _yolo_state()["log"][-500:]
 
         try:
             while True:
-                if _yolo_state["cancel_requested"]:
+                if _yolo_state()["cancel_requested"]:
                     ylog("YOLO cancelled by user.", "warn")
                     await broadcast_event({"type": "yolo_cancelled", "data": {}})
                     break
 
-                _yolo_state["cycle"] += 1
-                cycle = _yolo_state["cycle"]
+                _yolo_state()["cycle"] += 1
+                cycle = _yolo_state()["cycle"]
 
                 await broadcast_event({
                     "type": "yolo_cycle_start",
@@ -1369,11 +1462,11 @@ async def start_yolo(body: dict = {}) -> dict:
                 ylog(f"=== CYCLE {cycle} START {'[DRY RUN]' if dry_run else '[LIVE]'} ===")
 
                 # --- PHASE 1: DISCOVER ---
-                _yolo_state["phase"] = "discover"
+                _yolo_state()["phase"] = "discover"
                 ylog("Phase 1: Discovering jobs...")
                 await broadcast_event({"type": "yolo_phase", "data": {"phase": "discover", "cycle": cycle}})
 
-                profile_path = BASE_DIR.parent / "profile.yaml"
+                profile_path = usercontext.profile_path()
                 with open(profile_path) as f:
                     profile = yaml.safe_load(f)
 
@@ -1391,11 +1484,11 @@ async def start_yolo(body: dict = {}) -> dict:
                     ylog(f"Discovery error: {e}", "error")
                     await broadcast_event({"type": "yolo_error", "data": {"phase": "discover", "error": str(e)}})
 
-                if _yolo_state["cancel_requested"]:
+                if _yolo_state()["cancel_requested"]:
                     break
 
                 # --- PHASE 2: SCORE ---
-                _yolo_state["phase"] = "score"
+                _yolo_state()["phase"] = "score"
                 ylog("Phase 2: Scoring unscored jobs...")
                 await broadcast_event({"type": "yolo_phase", "data": {"phase": "score", "cycle": cycle}})
 
@@ -1410,7 +1503,7 @@ async def start_yolo(body: dict = {}) -> dict:
                     scored_count = 0
 
                     for job_row in unscored:
-                        if _yolo_state["cancel_requested"]:
+                        if _yolo_state()["cancel_requested"]:
                             break
                         try:
                             desc = (
@@ -1436,11 +1529,11 @@ async def start_yolo(body: dict = {}) -> dict:
                     ylog(f"Scoring error: {e}", "error")
                     await broadcast_event({"type": "yolo_error", "data": {"phase": "score", "error": str(e)}})
 
-                if _yolo_state["cancel_requested"]:
+                if _yolo_state()["cancel_requested"]:
                     break
 
                 # --- PHASE 3: APPLY ---
-                _yolo_state["phase"] = "apply"
+                _yolo_state()["phase"] = "apply"
                 ylog("Phase 3: Applying to matched jobs...")
                 await broadcast_event({"type": "yolo_phase", "data": {"phase": "apply", "cycle": cycle}})
 
@@ -1470,7 +1563,7 @@ async def start_yolo(body: dict = {}) -> dict:
                         ylog(f"No eligible jobs to apply to (today: {today_count}/{max_per_day}).")
                     else:
                         ylog(f"Applying to {len(eligible)} jobs...")
-                        _apply_state["running"] = True
+                        _apply_state()["running"] = True
 
                         async with async_playwright() as p:
                             browser = await p.chromium.launch(headless=not headed_supported(), slow_mo=100)
@@ -1486,11 +1579,11 @@ async def start_yolo(body: dict = {}) -> dict:
                             applied_count = 0
 
                             for i, job in enumerate(eligible):
-                                if _yolo_state["cancel_requested"]:
+                                if _yolo_state()["cancel_requested"]:
                                     break
 
                                 job_id = job["id"]
-                                _apply_state["job_id"] = job_id
+                                _apply_state()["job_id"] = job_id
                                 ylog(f"  [{i+1}/{len(eligible)}] {job['title']} @ {job['company']}")
 
                                 await broadcast_event({
@@ -1536,8 +1629,8 @@ async def start_yolo(body: dict = {}) -> dict:
 
                             await browser.close()
 
-                        _apply_state["running"] = False
-                        _apply_state["job_id"] = None
+                        _apply_state()["running"] = False
+                        _apply_state()["job_id"] = None
                         ylog(f"Applied to {applied_count}/{len(eligible)} jobs.")
 
                     await broadcast_event({
@@ -1547,22 +1640,22 @@ async def start_yolo(body: dict = {}) -> dict:
 
                 except Exception as e:
                     ylog(f"Apply error: {e}", "error")
-                    _apply_state["running"] = False
-                    _apply_state["job_id"] = None
+                    _apply_state()["running"] = False
+                    _apply_state()["job_id"] = None
                     await broadcast_event({"type": "yolo_error", "data": {"phase": "apply", "error": str(e)}})
 
                 # --- CYCLE COMPLETE ---
                 ylog(f"=== CYCLE {cycle} COMPLETE ===")
                 await broadcast_event({
                     "type": "yolo_cycle_complete",
-                    "data": {"cycle": cycle, "log_size": len(_yolo_state["log"])}
+                    "data": {"cycle": cycle, "log_size": len(_yolo_state()["log"])}
                 })
 
                 if not continuous:
                     break
 
                 # Wait for next cycle
-                _yolo_state["phase"] = "waiting"
+                _yolo_state()["phase"] = "waiting"
                 ylog(f"Next cycle in {interval_min} minutes...")
                 await broadcast_event({
                     "type": "yolo_waiting",
@@ -1571,7 +1664,7 @@ async def start_yolo(body: dict = {}) -> dict:
 
                 # Sleep in small increments so cancel is responsive
                 for _ in range(interval_min * 6):  # check every 10 seconds
-                    if _yolo_state["cancel_requested"]:
+                    if _yolo_state()["cancel_requested"]:
                         break
                     await asyncio.sleep(10)
 
@@ -1579,9 +1672,9 @@ async def start_yolo(body: dict = {}) -> dict:
             ylog(f"YOLO fatal error: {e}", "error")
             await broadcast_event({"type": "yolo_error", "data": {"phase": "fatal", "error": str(e)}})
         finally:
-            _yolo_state["running"] = False
-            _yolo_state["phase"] = None
-            _apply_state["running"] = False
+            _yolo_state()["running"] = False
+            _yolo_state()["phase"] = None
+            _apply_state()["running"] = False
 
     asyncio.create_task(_yolo_pipeline())
     return {
@@ -1597,19 +1690,19 @@ async def start_yolo(body: dict = {}) -> dict:
 async def yolo_status() -> dict:
     """Get current YOLO mode status and action log."""
     return {
-        "running": _yolo_state["running"],
-        "phase": _yolo_state["phase"],
-        "cycle": _yolo_state["cycle"],
-        "continuous": _yolo_state["continuous"],
-        "log_count": len(_yolo_state["log"]),
-        "recent_log": _yolo_state["log"][-20:],  # Last 20 entries
+        "running": _yolo_state()["running"],
+        "phase": _yolo_state()["phase"],
+        "cycle": _yolo_state()["cycle"],
+        "continuous": _yolo_state()["continuous"],
+        "log_count": len(_yolo_state()["log"]),
+        "recent_log": _yolo_state()["log"][-20:],  # Last 20 entries
     }
 
 
 @app.get("/api/yolo/log")
 async def yolo_log(offset: int = 0, limit: int = 100) -> dict:
     """Get full YOLO action log with pagination."""
-    log = _yolo_state["log"]
+    log = _yolo_state()["log"]
     return {
         "total": len(log),
         "entries": log[offset:offset + limit],
@@ -1619,10 +1712,10 @@ async def yolo_log(offset: int = 0, limit: int = 100) -> dict:
 @app.post("/api/yolo/cancel")
 async def cancel_yolo() -> dict:
     """Cancel YOLO mode after current action completes."""
-    if not _yolo_state["running"]:
+    if not _yolo_state()["running"]:
         return {"status": "not_running"}
-    _yolo_state["cancel_requested"] = True
-    _apply_state["cancel_requested"] = True  # Also cancel any active apply
+    _yolo_state()["cancel_requested"] = True
+    _apply_state()["cancel_requested"] = True  # Also cancel any active apply
     return {"status": "cancel_requested"}
 
 
@@ -1688,7 +1781,7 @@ async def trigger_scheduler_job(job_name: str) -> dict:
 async def check_email_now() -> dict:
     """Trigger an email check for application status updates."""
     import yaml
-    profile_path = BASE_DIR.parent / "profile.yaml"
+    profile_path = usercontext.profile_path()
     with open(profile_path) as f:
         profile = yaml.safe_load(f)
 
@@ -1723,15 +1816,35 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     proxies or firewalls that enforce idle timeouts. All other inbound
     messages are silently ignored — this is a server-push channel.
 
-    Auth: the HTTP middleware does not see WebSocket upgrades, so the same
-    Basic check runs here. Browsers re-send cached credentials on the
-    same-origin upgrade request, so the frontend needs no changes.
+    Auth (the HTTP middleware does not see WebSocket upgrades):
+      Firebase mode — the client's FIRST message must be
+      {"type": "auth", "token": "<firebase-id-token>"}; anything else, or an
+      invalid token, closes the socket. The verified uid scopes which events
+      this socket receives.
+      Legacy mode — same Basic check as HTTP; browsers re-send cached
+      credentials on the same-origin upgrade request.
     """
-    if not _basic_auth_ok(websocket.headers.get("authorization")):
-        await websocket.close(code=1008)
-        return
-    await websocket.accept()
-    ws_clients.append(websocket)
+    if multi_tenant_enabled():
+        await websocket.accept()
+        try:
+            first = await asyncio.wait_for(websocket.receive_text(), timeout=10)
+            msg = json.loads(first)
+            assert msg.get("type") == "auth"
+            from utils.auth import verify_firebase_token
+            user = verify_firebase_token(msg.get("token", ""))
+        except Exception:
+            await websocket.close(code=1008)
+            return
+        uid = user["uid"]
+        await websocket.send_text(json.dumps({"type": "auth_ok"}))
+    else:
+        if not _basic_auth_ok(websocket.headers.get("authorization")):
+            await websocket.close(code=1008)
+            return
+        await websocket.accept()
+        uid = usercontext.LEGACY_UID
+
+    ws_clients[websocket] = uid
     try:
         while True:
             data = await websocket.receive_text()
@@ -1742,8 +1855,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     except Exception as exc:
         logger.warning("WebSocket error: %s", exc)
     finally:
-        if websocket in ws_clients:
-            ws_clients.remove(websocket)
+        ws_clients.pop(websocket, None)
 
 
 # ===========================================================================
