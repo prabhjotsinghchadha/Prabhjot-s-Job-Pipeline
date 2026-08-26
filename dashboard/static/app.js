@@ -468,16 +468,22 @@ function pipeline() {
 
     async discover() {
       this.discovering = true;
+      // Safety net if the WebSocket drops — a full scan can take 20+ minutes.
       setTimeout(() => {
         this.discovering = false;
-      }, 120000);
-      this.notify("Discovery scan initiated...", "info");
-      this.addFeedItem(
-        "Discovery scan initiated. Searching all sources...",
-        "#22d3ee",
-      );
+      }, 1800000);
       try {
-        await fetch("/api/discover", { method: "POST" });
+        const res = await fetch("/api/discover", { method: "POST" });
+        const data = await res.json();
+        if (data.status === "already_running") {
+          this.notify("A discovery scan is already running.", "info");
+          return;
+        }
+        this.notify("Discovery scan initiated...", "info");
+        this.addFeedItem(
+          "Discovery scan initiated. Searching all sources...",
+          "#22d3ee",
+        );
       } catch (err) {
         this.discovering = false;
         this.notify(`Scan launch failed: ${err.message}`, "error");
@@ -1112,6 +1118,15 @@ function pipeline() {
         case "discovery_started":
           this.discovering = true;
           this.addFeedItem("Discovery scan in progress...", "#22d3ee");
+          break;
+
+        case "discovery_progress":
+          this.addFeedItem(
+            `${event.data.source}: ${event.data.found} found, ${event.data.new} new (${event.data.total_new} new so far)`,
+            "#22d3ee",
+          );
+          this.fetchJobs();
+          this.fetchStats();
           break;
 
         case "discovery_complete":

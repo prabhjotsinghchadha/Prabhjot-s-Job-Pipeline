@@ -15,4 +15,8 @@ services:
       # CLAUDE_CODE_OAUTH_TOKEN — from `claude setup-token`, uses a Pro/Max subscription
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
+      # Optional HTTP Basic auth for the dashboard. Blank = no auth (local).
+      # Required when hosting anywhere reachable from outside this machine.
+      - DASHBOARD_USER=${DASHBOARD_USER:-admin}
+      - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:-}
     restart: unless-stopped

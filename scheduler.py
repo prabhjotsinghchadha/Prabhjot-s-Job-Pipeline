@@ -32,19 +32,31 @@ async def scheduled_discover():
         profile = get_profile()
         if profile is None:
             return
-        jobs = await discover_all_jobs(profile)
-        new_count = 0
-        for job in jobs:
-            if not is_already_seen(job.id):
-                log_discovered(job)
-                new_count += 1
+
+        # Persist each source's results as it finishes — a restart mid-run
+        # keeps everything discovered so far.
+        seen_keys: set = set()
+        counts = {"total": 0, "new": 0}
+
+        async def on_source_jobs(source: str, jobs: list) -> None:
+            for job in jobs:
+                key = (job.title.lower().strip(), job.company.lower().strip())
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                counts["total"] += 1
+                if not is_already_seen(job.id):
+                    log_discovered(job)
+                    counts["new"] += 1
+
+        await discover_all_jobs(profile, on_source_jobs=on_source_jobs)
 
         _last_results["discover"] = {
-            "total": len(jobs),
-            "new": new_count,
+            "total": counts["total"],
+            "new": counts["new"],
             "timestamp": __import__("datetime").datetime.now().isoformat()
         }
-        print(f"[Scheduler] Discovery complete: {new_count} new jobs from {len(jobs)} total")
+        print(f"[Scheduler] Discovery complete: {counts['new']} new jobs from {counts['total']} total")
     except Exception as e:
         print(f"[Scheduler] Discovery failed: {e}")
         _last_results["discover"] = {"error": str(e)}

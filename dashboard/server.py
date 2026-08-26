@@ -76,6 +76,52 @@ async def lifespan(app):
 app = FastAPI(title="Prabhjot's Pipeline", version="1.0.0", lifespan=lifespan)
 
 
+# ---------------------------------------------------------------------------
+# Authentication — HTTP Basic, enabled by setting DASHBOARD_PASSWORD.
+#
+# The dashboard was designed for loopback-only use; when it is hosted
+# somewhere reachable (Railway, a VPS, a tunnel) it MUST NOT be open to the
+# world: it exposes the profile, resume, and application actions. With
+# DASHBOARD_PASSWORD unset, behavior is unchanged (no auth, local use).
+# ---------------------------------------------------------------------------
+import os
+import secrets as _secrets
+
+from fastapi.responses import Response
+
+DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "admin")
+DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
+
+# Reachable without credentials so container/platform healthchecks pass.
+_AUTH_EXEMPT_PATHS = {"/api/health"}
+
+
+def _basic_auth_ok(auth_header: Optional[str]) -> bool:
+    if not DASHBOARD_PASSWORD:
+        return True
+    if not auth_header or not auth_header.lower().startswith("basic "):
+        return False
+    try:
+        decoded = base64.b64decode(auth_header.split(" ", 1)[1]).decode("utf-8")
+        user, _, password = decoded.partition(":")
+    except Exception:
+        return False
+    user_ok = _secrets.compare_digest(user, DASHBOARD_USER)
+    pass_ok = _secrets.compare_digest(password, DASHBOARD_PASSWORD)
+    return user_ok and pass_ok
+
+
+@app.middleware("http")
+async def _basic_auth_middleware(request: Request, call_next):
+    if DASHBOARD_PASSWORD and request.url.path not in _AUTH_EXEMPT_PATHS:
+        if not _basic_auth_ok(request.headers.get("authorization")):
+            return Response(
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="Prabhjot\'s Pipeline"'},
+            )
+    return await call_next(request)
+
+
 @app.get("/api/health")
 async def health() -> dict:
     """Health check for Docker and monitoring."""
@@ -598,45 +644,97 @@ async def download_resume(name: str):
 # REST API — Background actions
 # ===========================================================================
 
+# Only one discovery run at a time — overlapping runs hammer the job boards
+# (rate-limit risk) and multiply an already multi-minute scrape.
+_discovery_running = False
+
+
+def _incremental_saver(broadcast: bool = True):
+    """
+    Build an on_source_jobs callback for discover_all_jobs that persists each
+    source's results to SQLite as soon as that source finishes, so jobs appear
+    on the dashboard within seconds instead of after the full run — and survive
+    a mid-run crash or container restart.
+
+    Returns (callback, counts) where counts accumulates {"total", "new"}.
+    """
+    from utils.tracker import is_already_seen, log_discovered
+
+    seen_keys: set = set()
+    counts = {"total": 0, "new": 0}
+
+    async def on_source_jobs(source: str, jobs: list) -> None:
+        new_in_source = 0
+        for job in jobs:
+            key = (job.title.lower().strip(), job.company.lower().strip())
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            counts["total"] += 1
+            if not is_already_seen(job.id):
+                log_discovered(job)
+                new_in_source += 1
+                counts["new"] += 1
+        if broadcast:
+            await broadcast_event(
+                {
+                    "type": "discovery_progress",
+                    "data": {
+                        "source": source,
+                        "found": len(jobs),
+                        "new": new_in_source,
+                        "total_new": counts["new"],
+                    },
+                }
+            )
+
+    return on_source_jobs, counts
+
+
 @app.post("/api/discover")
 async def trigger_discover() -> dict:
     """
     Launch a full discovery run in the background.
 
-    The endpoint returns immediately with {"status": "started"}.
-    Progress events (discovery_started, discovery_complete, discovery_error)
-    are broadcast over the WebSocket.
+    The endpoint returns immediately with {"status": "started"}, or
+    {"status": "already_running"} if a run is in progress.
+    Progress events (discovery_started, discovery_progress per source,
+    discovery_complete, discovery_error) are broadcast over the WebSocket,
+    and jobs are saved incrementally as each source finishes.
     """
     import yaml
+
+    global _discovery_running
+    if _discovery_running:
+        return {"status": "already_running"}
+    _discovery_running = True
 
     profile_path = BASE_DIR.parent / "profile.yaml"
     with open(profile_path) as f:
         profile = yaml.safe_load(f)
 
     async def _run_discovery() -> None:
+        global _discovery_running
         try:
             await broadcast_event({"type": "discovery_started", "data": {}})
 
             from utils.discovery import discover_all_jobs
-            from utils.tracker import is_already_seen, log_discovered
 
-            jobs = await discover_all_jobs(profile)
-            new_count = 0
-            for job in jobs:
-                if not is_already_seen(job.id):
-                    log_discovered(job)
-                    new_count += 1
+            on_source_jobs, counts = _incremental_saver()
+            await discover_all_jobs(profile, on_source_jobs=on_source_jobs)
 
             await broadcast_event(
                 {
                     "type": "discovery_complete",
-                    "data": {"total": len(jobs), "new": new_count},
+                    "data": {"total": counts["total"], "new": counts["new"]},
                 }
             )
         except Exception as exc:
             await broadcast_event(
                 {"type": "discovery_error", "data": {"error": str(exc)}}
             )
+        finally:
+            _discovery_running = False
 
     asyncio.create_task(_run_discovery())
     return {"status": "started"}
@@ -1281,18 +1379,13 @@ async def start_yolo(body: dict = {}) -> dict:
 
                 try:
                     from utils.discovery import discover_all_jobs
-                    from utils.tracker import is_already_seen, log_discovered
 
-                    jobs = await discover_all_jobs(profile)
-                    new_count = 0
-                    for job in jobs:
-                        if not is_already_seen(job.id):
-                            log_discovered(job)
-                            new_count += 1
-                    ylog(f"Discovered {new_count} new jobs from {len(jobs)} total.")
+                    on_source_jobs, counts = _incremental_saver()
+                    await discover_all_jobs(profile, on_source_jobs=on_source_jobs)
+                    ylog(f"Discovered {counts['new']} new jobs from {counts['total']} total.")
                     await broadcast_event({
                         "type": "yolo_discover_done",
-                        "data": {"total": len(jobs), "new": new_count, "cycle": cycle}
+                        "data": {"total": counts["total"], "new": counts["new"], "cycle": cycle}
                     })
                 except Exception as e:
                     ylog(f"Discovery error: {e}", "error")
@@ -1629,7 +1722,14 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     The client may send "ping" to keep the connection alive through
     proxies or firewalls that enforce idle timeouts. All other inbound
     messages are silently ignored — this is a server-push channel.
+
+    Auth: the HTTP middleware does not see WebSocket upgrades, so the same
+    Basic check runs here. Browsers re-send cached credentials on the
+    same-origin upgrade request, so the frontend needs no changes.
     """
+    if not _basic_auth_ok(websocket.headers.get("authorization")):
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     ws_clients.append(websocket)
     try:

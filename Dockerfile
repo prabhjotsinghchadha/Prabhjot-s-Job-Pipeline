@@ -43,10 +43,11 @@ RUN mkdir -p .cache resumes logs
 
 # Copy application
 COPY . .
+RUN chmod +x docker-entrypoint.sh
 
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8080/api/health || exit 1
+    CMD curl -f http://localhost:${PORT:-8080}/api/health || exit 1
 
-CMD ["python", "main.py", "server", "--port", "8080"]
+CMD ["./docker-entrypoint.sh"]

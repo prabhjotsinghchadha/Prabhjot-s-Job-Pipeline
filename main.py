@@ -404,6 +404,19 @@ Examples:
         cmd_reset()
         return
 
+    if args.command == "server":
+        # The server must boot without profile.yaml — on a fresh deploy the
+        # dashboard's first-run wizard creates it. The dashboard reads the
+        # profile per-request and the scheduler tolerates its absence.
+        from dashboard.server import run_server
+        try:
+            from scheduler import setup_scheduler
+            setup_scheduler()  # Configures jobs; actual start happens in FastAPI lifespan
+        except Exception as e:
+            print(f"  Scheduler setup warning: {e}")
+        run_server(host=args.host, port=args.port)
+        return
+
     profile = load_profile()
 
     if args.command == "discover":
@@ -416,14 +429,6 @@ Examples:
         asyncio.run(cmd_single(profile, args.url, dry_run=dry_run))
     elif args.command == "rescore":
         asyncio.run(cmd_rescore(profile))
-    elif args.command == "server":
-        from dashboard.server import run_server
-        try:
-            from scheduler import setup_scheduler
-            setup_scheduler()  # Configures jobs; actual start happens in FastAPI lifespan
-        except Exception as e:
-            print(f"  Scheduler setup warning: {e}")
-        run_server(host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

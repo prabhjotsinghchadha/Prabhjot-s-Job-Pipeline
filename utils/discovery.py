@@ -180,15 +180,26 @@ async def discover_lever_jobs(company_slug: str, role_keywords: list[str]) -> li
     return jobs
 
 
-async def discover_all_jobs(profile: dict) -> list[Job]:
+async def discover_all_jobs(profile: dict, on_source_jobs=None) -> list[Job]:
     """
     Discover jobs from all configured sources in profile.yaml.
     Runs enabled sources: greenhouse, lever, jobspy, rss, career_pages.
     Deduplicates results across sources.
+
+    on_source_jobs: optional async callback (source_name, jobs) invoked as each
+    source finishes, so callers can persist results incrementally instead of
+    waiting the full multi-minute run. A callback failure never aborts the run.
     """
     all_jobs = []
     role_keywords = profile["preferences"]["roles"]
     boards = profile.get("target_boards", {})
+
+    async def _notify(source: str, jobs: list) -> None:
+        if on_source_jobs and jobs:
+            try:
+                await on_source_jobs(source, jobs)
+            except Exception as e:
+                print(f"  ⚠ incremental save failed for {source}: {e}")
 
     # Greenhouse boards
     gh_companies = boards.get("greenhouse", [])
@@ -196,10 +207,13 @@ async def discover_all_jobs(profile: dict) -> list[Job]:
         print(f"\n🌿 Scanning {len(gh_companies)} Greenhouse boards...")
         tasks = [discover_greenhouse_jobs(slug, role_keywords) for slug in gh_companies]
         results = await asyncio.gather(*tasks)
+        gh_jobs = []
         for jobs in results:
-            all_jobs.extend(jobs)
+            gh_jobs.extend(jobs)
             if jobs:
                 print(f"   ✅ {jobs[0].company}: {len(jobs)} matching jobs")
+        all_jobs.extend(gh_jobs)
+        await _notify("greenhouse", gh_jobs)
 
     # Lever boards
     lever_companies = boards.get("lever", [])
@@ -207,10 +221,13 @@ async def discover_all_jobs(profile: dict) -> list[Job]:
         print(f"\n🔧 Scanning {len(lever_companies)} Lever boards...")
         tasks = [discover_lever_jobs(slug, role_keywords) for slug in lever_companies]
         results = await asyncio.gather(*tasks)
+        lever_jobs = []
         for jobs in results:
-            all_jobs.extend(jobs)
+            lever_jobs.extend(jobs)
             if jobs:
                 print(f"   ✅ {jobs[0].company}: {len(jobs)} matching jobs")
+        all_jobs.extend(lever_jobs)
+        await _notify("lever", lever_jobs)
 
     # JobSpy — keyword search across Indeed, LinkedIn, Glassdoor, etc.
     search_config = profile.get("search", {})
@@ -222,6 +239,7 @@ async def discover_all_jobs(profile: dict) -> list[Job]:
             # feed, and healthcheck stay live during a multi-minute scrape.
             jobspy_jobs = await asyncio.to_thread(discover_jobspy_jobs, profile)
             all_jobs.extend(jobspy_jobs)
+            await _notify("jobspy", jobspy_jobs)
         except Exception as e:
             print(f"  ⚠ JobSpy search failed: {e}")
 
@@ -231,6 +249,7 @@ async def discover_all_jobs(profile: dict) -> list[Job]:
         print(f"\n📡 Checking RSS feeds...")
         rss_jobs = await asyncio.to_thread(discover_rss_jobs, profile)
         all_jobs.extend(rss_jobs)
+        await _notify("rss", rss_jobs)
     except Exception as e:
         print(f"  ⚠ RSS feeds failed: {e}")
 
@@ -240,6 +259,7 @@ async def discover_all_jobs(profile: dict) -> list[Job]:
         print(f"\n🚀 Checking startup & niche boards...")
         startup_jobs = await asyncio.to_thread(discover_startup_jobs, profile)
         all_jobs.extend(startup_jobs)
+        await _notify("startup_boards", startup_jobs)
     except Exception as e:
         print(f"  ⚠ Startup boards failed: {e}")
 
@@ -249,6 +269,7 @@ async def discover_all_jobs(profile: dict) -> list[Job]:
         print(f"\n📊 Searching Adzuna...")
         adzuna_jobs = await asyncio.to_thread(discover_adzuna_jobs, profile)
         all_jobs.extend(adzuna_jobs)
+        await _notify("adzuna", adzuna_jobs)
     except Exception as e:
         print(f"  ⚠ Adzuna failed: {e}")
 
@@ -258,6 +279,7 @@ async def discover_all_jobs(profile: dict) -> list[Job]:
         print(f"\n📰 Checking HN Who is Hiring...")
         hn_jobs = await asyncio.to_thread(discover_hn_jobs, profile)
         all_jobs.extend(hn_jobs)
+        await _notify("hn", hn_jobs)
     except Exception as e:
         print(f"  ⚠ HN Who is Hiring failed: {e}")
 
@@ -268,6 +290,7 @@ async def discover_all_jobs(profile: dict) -> list[Job]:
             print(f"\n🌐 Scraping custom career pages...")
             career_jobs = await discover_career_page_jobs(profile)
             all_jobs.extend(career_jobs)
+            await _notify("career_pages", career_jobs)
         except Exception as e:
             print(f"  ⚠ Career page scraping failed: {e}")
 
