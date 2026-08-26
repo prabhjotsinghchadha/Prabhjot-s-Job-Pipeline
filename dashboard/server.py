@@ -507,6 +507,23 @@ async def get_profile() -> dict:
         return yaml.safe_load(f)
 
 
+@app.get("/api/sources")
+async def get_sources() -> list:
+    """Catalog of discovery sources with their current on/off state.
+    Toggle via PATCH /api/profile with {"sources": {"<key>": bool}}."""
+    import yaml
+    from utils.discovery import SOURCE_REGISTRY, source_enabled
+    profile = {}
+    profile_path = usercontext.profile_path()
+    if profile_path.exists():
+        with open(profile_path) as f:
+            profile = yaml.safe_load(f) or {}
+    return [
+        {**entry, "enabled": source_enabled(profile, entry["key"])}
+        for entry in SOURCE_REGISTRY
+    ]
+
+
 @app.post("/api/setup")
 async def run_setup(body: dict) -> dict:
     """First-run wizard: create profile.yaml from wizard data."""

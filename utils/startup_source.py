@@ -56,15 +56,19 @@ def discover_startup_jobs(profile: dict) -> list:
                    profile.get("skills", {}).get("primary", []) +
                    profile.get("skills", {}).get("secondary", [])]
 
+    from utils.discovery import source_enabled
+
     sources = [
-        ("YC Jobs", lambda: _fetch_yc_jobs(all_keywords)),
-        ("Remotive", lambda: _fetch_remotive(all_keywords)),
-        ("Himalayas", lambda: _fetch_himalayas(all_keywords)),
-        ("Arbeitnow", lambda: _fetch_arbeitnow(all_keywords, remote_only)),
-        ("WeWorkRemotely", lambda: _fetch_weworkremotely(all_keywords)),
-        ("web3.career", lambda: _fetch_web3_career(all_keywords, skill_words)),
+        ("yc_jobs", "YC Jobs", lambda: _fetch_yc_jobs(all_keywords)),
+        ("remotive", "Remotive", lambda: _fetch_remotive(all_keywords)),
+        ("himalayas", "Himalayas", lambda: _fetch_himalayas(all_keywords)),
+        ("arbeitnow", "Arbeitnow", lambda: _fetch_arbeitnow(all_keywords, remote_only)),
+        ("weworkremotely", "WeWorkRemotely", lambda: _fetch_weworkremotely(all_keywords)),
+        ("web3career", "web3.career", lambda: _fetch_web3_career(all_keywords, skill_words)),
     ]
-    for name, fetch in sources:
+    for key, name, fetch in sources:
+        if not source_enabled(profile, key):
+            continue
         try:
             jobs = fetch()
             all_jobs.extend(jobs)

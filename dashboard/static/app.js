@@ -71,6 +71,10 @@ function pipeline() {
     newSecondarySkill: "",
     newFavCompany: "",
     newSearchQuery: "",
+    newCareerPageUrl: "",
+
+    // ----- Discovery Sources -----
+    sourceCatalog: [],
 
     // ----- View Routing -----
     currentView: "dashboard", // 'dashboard' | 'profile'
@@ -125,6 +129,7 @@ function pipeline() {
     profileSections: {
       identity: true,
       workAuth: false,
+      sources: true,
       resumes: true,
       coverLetters: false,
       jobPrefs: true,
@@ -1687,6 +1692,44 @@ function pipeline() {
       } catch (err) {
         this.notify("Failed to load profile", "error");
       }
+      this.loadSourceCatalog();
+    },
+
+    async loadSourceCatalog() {
+      try {
+        const res = await fetch("/api/sources");
+        this.sourceCatalog = await res.json();
+      } catch (_) {}
+    },
+
+    isSourceEnabled(key) {
+      return (this.fullProfile.sources || {})[key] !== false;
+    },
+
+    toggleSource(key, enabled) {
+      if (!this.fullProfile.sources) this.fullProfile.sources = {};
+      this.fullProfile.sources[key] = enabled;
+      this.scheduleProfileSave();
+    },
+
+    addCareerPage() {
+      let url = this.newCareerPageUrl?.trim();
+      if (!url) return;
+      if (!/^https?:\/\//i.test(url)) url = "https://" + url;
+      try {
+        new URL(url);
+      } catch (_) {
+        this.notify("That doesn't look like a valid URL.", "warning");
+        return;
+      }
+      if (!Array.isArray(this.fullProfile.custom_career_pages)) {
+        this.fullProfile.custom_career_pages = [];
+      }
+      if (!this.fullProfile.custom_career_pages.includes(url)) {
+        this.fullProfile.custom_career_pages.push(url);
+        this.scheduleProfileSave();
+      }
+      this.newCareerPageUrl = "";
     },
 
     updateProfileField(path, value) {

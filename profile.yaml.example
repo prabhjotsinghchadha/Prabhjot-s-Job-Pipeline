@@ -79,6 +79,22 @@ favorite_companies:
 - figma
 - vercel
 custom_career_pages: []
+# Per-source discovery toggles — set any to false to skip that site.
+# A missing key means enabled. Full catalog: utils/discovery.py SOURCE_REGISTRY.
+sources:
+  greenhouse: true
+  lever: true
+  jobspy: true
+  remoteok: true
+  yc_jobs: true
+  remotive: true
+  himalayas: true
+  arbeitnow: true
+  weworkremotely: true
+  web3career: true
+  adzuna: true
+  hn: true
+  career_pages: true
 rate_limits:
   max_applications_per_day: 25
   min_delay_seconds: 60

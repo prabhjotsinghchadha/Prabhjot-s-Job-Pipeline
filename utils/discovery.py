@@ -29,6 +29,50 @@ class Job:
         return asdict(self)
 
 
+# Every toggleable discovery source. The dashboard renders this catalog and the
+# per-source on/off switches live in profile.yaml under `sources:` (missing key
+# means enabled, so existing profiles keep discovering from everything).
+SOURCE_REGISTRY = [
+    {"key": "greenhouse", "label": "Greenhouse Boards",
+     "description": "Target company boards via the Greenhouse API (configure slugs under Target Boards)"},
+    {"key": "lever", "label": "Lever Boards",
+     "description": "Target company boards via the Lever API (configure slugs under Target Boards)"},
+    {"key": "jobspy", "label": "Indeed / LinkedIn / Google",
+     "description": "Keyword search across major job boards via JobSpy"},
+    {"key": "remoteok", "label": "RemoteOK",
+     "description": "Remote-first tech jobs from remoteok.com"},
+    {"key": "yc_jobs", "label": "Y Combinator Jobs",
+     "description": "YC startup roles from ycombinator.com/jobs"},
+    {"key": "remotive", "label": "Remotive",
+     "description": "Remote software jobs from remotive.com"},
+    {"key": "himalayas", "label": "Himalayas",
+     "description": "Remote jobs with salary data from himalayas.app"},
+    {"key": "arbeitnow", "label": "Arbeitnow",
+     "description": "EU-heavy job board from arbeitnow.com"},
+    {"key": "weworkremotely", "label": "WeWorkRemotely",
+     "description": "Remote programming jobs from weworkremotely.com"},
+    {"key": "web3career", "label": "web3.career",
+     "description": "Web3 and blockchain roles from web3.career"},
+    {"key": "adzuna", "label": "Adzuna",
+     "description": "Adzuna aggregator API (needs a free API key)"},
+    {"key": "hn", "label": "HN Who is Hiring",
+     "description": "Monthly Hacker News hiring thread via Algolia"},
+    {"key": "career_pages", "label": "Custom Career Pages",
+     "description": "Any website URL you add, scraped with Playwright + AI"},
+]
+
+# Sources implemented inside utils/startup_source.py — the module runs when any
+# of these is enabled and skips the disabled ones internally.
+STARTUP_BOARD_KEYS = ["yc_jobs", "remotive", "himalayas", "arbeitnow",
+                      "weworkremotely", "web3career"]
+
+
+def source_enabled(profile: dict, key: str) -> bool:
+    """True unless profile.yaml explicitly disables the source (sources.<key>: false)."""
+    sources = profile.get("sources") or {}
+    return sources.get(key) is not False
+
+
 def deduplicate_jobs(jobs: list) -> list:
     """Deduplicate jobs by (title_lower, company_lower) to avoid cross-source duplicates."""
     seen = set()
@@ -202,7 +246,7 @@ async def discover_all_jobs(profile: dict, on_source_jobs=None) -> list[Job]:
                 print(f"  ⚠ incremental save failed for {source}: {e}")
 
     # Greenhouse boards
-    gh_companies = boards.get("greenhouse", [])
+    gh_companies = boards.get("greenhouse", []) if source_enabled(profile, "greenhouse") else []
     if gh_companies:
         print(f"\n🌿 Scanning {len(gh_companies)} Greenhouse boards...")
         tasks = [discover_greenhouse_jobs(slug, role_keywords) for slug in gh_companies]
@@ -216,7 +260,7 @@ async def discover_all_jobs(profile: dict, on_source_jobs=None) -> list[Job]:
         await _notify("greenhouse", gh_jobs)
 
     # Lever boards
-    lever_companies = boards.get("lever", [])
+    lever_companies = boards.get("lever", []) if source_enabled(profile, "lever") else []
     if lever_companies:
         print(f"\n🔧 Scanning {len(lever_companies)} Lever boards...")
         tasks = [discover_lever_jobs(slug, role_keywords) for slug in lever_companies]
@@ -230,8 +274,9 @@ async def discover_all_jobs(profile: dict, on_source_jobs=None) -> list[Job]:
         await _notify("lever", lever_jobs)
 
     # JobSpy — keyword search across Indeed, LinkedIn, Glassdoor, etc.
+    # Respects both the sources toggle and the legacy search.enabled flag.
     search_config = profile.get("search", {})
-    if search_config.get("enabled", True):
+    if source_enabled(profile, "jobspy") and search_config.get("enabled", True):
         try:
             from utils.jobspy_source import discover_jobspy_jobs
             print(f"\n🔍 Searching job boards via JobSpy...")
@@ -244,47 +289,52 @@ async def discover_all_jobs(profile: dict, on_source_jobs=None) -> list[Job]:
             print(f"  ⚠ JobSpy search failed: {e}")
 
     # RSS feeds — RemoteOK, etc.
-    try:
-        from utils.rss_source import discover_rss_jobs
-        print(f"\n📡 Checking RSS feeds...")
-        rss_jobs = await asyncio.to_thread(discover_rss_jobs, profile)
-        all_jobs.extend(rss_jobs)
-        await _notify("rss", rss_jobs)
-    except Exception as e:
-        print(f"  ⚠ RSS feeds failed: {e}")
+    if source_enabled(profile, "remoteok"):
+        try:
+            from utils.rss_source import discover_rss_jobs
+            print(f"\n📡 Checking RSS feeds...")
+            rss_jobs = await asyncio.to_thread(discover_rss_jobs, profile)
+            all_jobs.extend(rss_jobs)
+            await _notify("rss", rss_jobs)
+        except Exception as e:
+            print(f"  ⚠ RSS feeds failed: {e}")
 
     # Startup & niche boards — YC Jobs, Remotive, Himalayas, Arbeitnow, WWR, web3.career
-    try:
-        from utils.startup_source import discover_startup_jobs
-        print(f"\n🚀 Checking startup & niche boards...")
-        startup_jobs = await asyncio.to_thread(discover_startup_jobs, profile)
-        all_jobs.extend(startup_jobs)
-        await _notify("startup_boards", startup_jobs)
-    except Exception as e:
-        print(f"  ⚠ Startup boards failed: {e}")
+    # The module itself skips whichever boards are toggled off.
+    if any(source_enabled(profile, key) for key in STARTUP_BOARD_KEYS):
+        try:
+            from utils.startup_source import discover_startup_jobs
+            print(f"\n🚀 Checking startup & niche boards...")
+            startup_jobs = await asyncio.to_thread(discover_startup_jobs, profile)
+            all_jobs.extend(startup_jobs)
+            await _notify("startup_boards", startup_jobs)
+        except Exception as e:
+            print(f"  ⚠ Startup boards failed: {e}")
 
     # Adzuna API
-    try:
-        from utils.adzuna_source import discover_adzuna_jobs
-        print(f"\n📊 Searching Adzuna...")
-        adzuna_jobs = await asyncio.to_thread(discover_adzuna_jobs, profile)
-        all_jobs.extend(adzuna_jobs)
-        await _notify("adzuna", adzuna_jobs)
-    except Exception as e:
-        print(f"  ⚠ Adzuna failed: {e}")
+    if source_enabled(profile, "adzuna"):
+        try:
+            from utils.adzuna_source import discover_adzuna_jobs
+            print(f"\n📊 Searching Adzuna...")
+            adzuna_jobs = await asyncio.to_thread(discover_adzuna_jobs, profile)
+            all_jobs.extend(adzuna_jobs)
+            await _notify("adzuna", adzuna_jobs)
+        except Exception as e:
+            print(f"  ⚠ Adzuna failed: {e}")
 
     # HN Who is Hiring
-    try:
-        from utils.hn_source import discover_hn_jobs
-        print(f"\n📰 Checking HN Who is Hiring...")
-        hn_jobs = await asyncio.to_thread(discover_hn_jobs, profile)
-        all_jobs.extend(hn_jobs)
-        await _notify("hn", hn_jobs)
-    except Exception as e:
-        print(f"  ⚠ HN Who is Hiring failed: {e}")
+    if source_enabled(profile, "hn"):
+        try:
+            from utils.hn_source import discover_hn_jobs
+            print(f"\n📰 Checking HN Who is Hiring...")
+            hn_jobs = await asyncio.to_thread(discover_hn_jobs, profile)
+            all_jobs.extend(hn_jobs)
+            await _notify("hn", hn_jobs)
+        except Exception as e:
+            print(f"  ⚠ HN Who is Hiring failed: {e}")
 
     # Custom career pages
-    if profile.get("custom_career_pages"):
+    if source_enabled(profile, "career_pages") and profile.get("custom_career_pages"):
         try:
             from utils.career_page_source import discover_career_page_jobs
             print(f"\n🌐 Scraping custom career pages...")

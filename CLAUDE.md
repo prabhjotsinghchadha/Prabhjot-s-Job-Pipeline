@@ -130,6 +130,7 @@ GET    /api/companies              — Company list
 GET    /api/statuses               — Valid status values
 GET    /api/profile                — Read profile.yaml
 PATCH  /api/profile                — Update profile.yaml
+GET    /api/sources                — Discovery source catalog + enabled state (toggle via PATCH /api/profile {"sources": {...}})
 GET    /api/scheduler/status       — Scheduler state + next run times
 POST   /api/scheduler/trigger/{job}— Manually trigger scheduler job
 ```
@@ -194,6 +195,7 @@ skills: # Primary and secondary skill lists for scoring
 ideal_job_description: # Free-text ideal job for semantic matching
 favorite_companies: # +10 scoring boost
 custom_career_pages: # URLs to scrape with Playwright
+sources: # Per-source on/off toggles (greenhouse, lever, jobspy, remoteok, yc_jobs, remotive, himalayas, arbeitnow, weworkremotely, web3career, adzuna, hn, career_pages) — missing key = enabled; catalog in utils/discovery.py SOURCE_REGISTRY
 rate_limits: # max_per_day, min/max delay between applications
 schedule: # Discovery/scoring intervals, enabled flag
 email: # IMAP config for email checking

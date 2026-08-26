@@ -21,7 +21,7 @@
     </script>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-    <script defer src="/static/app.js?v=20260827"></script>
+    <script defer src="/static/app.js?v=20260827b"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 
     <link rel="stylesheet" href="/static/style.css?v=20260827" />
@@ -1553,6 +1553,61 @@
                                       :value="fullProfile.ideal_job_description || ''"
                                       @blur="updateProfileField('ideal_job_description', $event.target.value)"
                                       placeholder="Describe your ideal role for AI matching..."></textarea>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- DISCOVERY SOURCES -->
+                <div class="mc-panel">
+                    <div class="mc-panel-header cursor-pointer" @click="toggleSection('sources')">
+                        <span class="dot" style="background:var(--phosphor);box-shadow:0 0 6px var(--phosphor-glow)"></span>
+                        DISCOVERY SOURCES
+                        <span class="ml-auto text-[0.55rem]" x-text="profileSections.sources ? '▼' : '▶'"></span>
+                    </div>
+                    <div x-show="profileSections.sources" x-transition class="p-4 space-y-4">
+                        <div class="text-[0.62rem] font-mono text-[#475569]">
+                            Choose which sites each discovery run scans. Changes apply to the next run.
+                        </div>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                            <template x-for="src in sourceCatalog" :key="src.key">
+                                <label class="flex items-start gap-2 cursor-pointer p-2 rounded border border-[#1e293b] hover:border-[#334155]"
+                                       :title="src.description">
+                                    <input type="checkbox" class="mt-0.5"
+                                           :checked="isSourceEnabled(src.key)"
+                                           @change="toggleSource(src.key, $event.target.checked)" />
+                                    <span>
+                                        <span class="block text-[0.68rem] text-[#e2e8f0]"
+                                              :class="isSourceEnabled(src.key) ? '' : 'opacity-50'"
+                                              x-text="src.label"></span>
+                                        <span class="block text-[0.55rem] font-mono text-[#475569]" x-text="src.description"></span>
+                                    </span>
+                                </label>
+                            </template>
+                        </div>
+                        <!-- Custom Career Pages -->
+                        <div>
+                            <span class="pref-label">Custom Websites to Scrape</span>
+                            <div class="text-[0.6rem] font-mono text-[#475569] mb-2">
+                                Add any company careers page or job board URL — scraped with Playwright + AI.
+                            </div>
+                            <div class="space-y-1.5 mb-2">
+                                <template x-for="(url, i) in getProfileArray('custom_career_pages')" :key="'ccp-'+i">
+                                    <div class="flex items-center gap-2 p-2 rounded border border-[#1e293b]">
+                                        <span class="text-[0.65rem] font-mono text-cyan-400 truncate flex-1" x-text="url"></span>
+                                        <button @click="removeProfileArrayItem('custom_career_pages', i)"
+                                                class="text-[0.6rem] font-mono text-rose-500 hover:text-rose-300">REMOVE</button>
+                                    </div>
+                                </template>
+                            </div>
+                            <div class="flex gap-2">
+                                <input type="text" x-model="newCareerPageUrl" @keydown.enter.prevent="addCareerPage()"
+                                       placeholder="https://company.com/careers" class="mc-input text-[0.68rem] py-1.5 flex-1" />
+                                <button @click="addCareerPage()" class="cmd-btn secondary text-[0.6rem] py-1.5 px-3">ADD</button>
+                            </div>
+                            <div x-show="!isSourceEnabled('career_pages') && getProfileArray('custom_career_pages').length"
+                                 class="mt-2 text-[0.6rem] font-mono text-amber-400">
+                                Custom Career Pages source is toggled off — these URLs won't be scanned.
+                            </div>
                         </div>
                     </div>
                 </div>
