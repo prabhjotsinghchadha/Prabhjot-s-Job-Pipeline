@@ -122,7 +122,9 @@ async def _score_for_current_user():
         for job_row in unscored:
             try:
                 desc = job_row.get("description", "") or f"Job: {job_row['title']} at {job_row['company']}"
-                result = brain.match_job(desc, profile, resume_text=resume_text)
+                # Off the event loop — match_job blocks on a `claude -p` subprocess
+                # for up to 120s per job, which would freeze the whole dashboard.
+                result = await asyncio.to_thread(brain.match_job, desc, profile, resume_text=resume_text)
                 score = result.get("score", 0)
                 log_matched(job_row["id"], score, result.get("reasoning", ""), result.get("cover_letter", ""))
                 if score < min_score:
@@ -148,7 +150,7 @@ async def _email_check_for_current_user():
         profile = get_profile()
         if profile is None or not profile.get("email", {}).get("enabled", False):
             return
-        results = check_emails(profile)
+        results = await asyncio.to_thread(check_emails, profile)
         _results()["email"] = {
             "checked": len(results),
             "timestamp": __import__("datetime").datetime.now().isoformat()
