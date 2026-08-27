@@ -108,6 +108,113 @@ async def _detect_wall(page_like) -> str:
     return ""
 
 
+# After a wait for manual verification times out, don't stall every
+# subsequent apply in the same process (batch runs) — fail fast instead
+# until this cooldown passes.
+_VERIFICATION_WAIT_COOLDOWN_S = 1800
+_last_wait_timeout_at = 0.0
+
+
+async def _await_manual_verification(page, retry_url: str,
+                                     timeout_s: int = 600) -> bool:
+    """
+    Indeed/Cloudflare is asking for human verification. Instead of failing,
+    wait for the user to solve it manually, then continue automatically.
+
+    Two ways the user can clear it:
+    1. Headed run (host): solve the challenge right in the visible apply
+       browser — Cloudflare then redirects this tab onward by itself.
+    2. Headless run (Docker): run `python3.11 main.py login` on the host,
+       open indeed.com in that window, complete the check, close it. The
+       refreshed .cache/login_state.json (bind-mounted into the container)
+       carries the new clearance cookie; we watch the file, re-import the
+       cookies, and reload. NOTE: Cloudflare may bind its clearance to the
+       solving browser — if the wall persists after import, the only sure
+       path is waiting out the rate limit.
+
+    Returns True when the wall is gone and the page is loaded again.
+    """
+    global _last_wait_timeout_at
+    import time as _time
+
+    if _time.monotonic() - _last_wait_timeout_at < _VERIFICATION_WAIT_COOLDOWN_S \
+            and _last_wait_timeout_at > 0:
+        print("  [!] Recent verification wait timed out — failing fast "
+              "(retry later or complete the check via `python3.11 main.py login`)")
+        return False
+
+    from utils.browser import login_state_path, import_login_state
+    from utils.system_state import is_paused
+
+    path = login_state_path()
+    try:
+        baseline = path.stat().st_mtime if path.exists() else 0
+    except Exception:
+        baseline = 0
+
+    print("  [=] WAITING for human verification (up to "
+          f"{timeout_s // 60} min)...")
+    print("      Option A (visible browser): solve the challenge in the "
+          "apply window.")
+    print("      Option B (Docker/headless): on your Mac run "
+          "`python3.11 main.py login`,")
+    print("      open https://www.indeed.com, complete the check, close "
+          "the window.")
+
+    waited = 0
+    while waited < timeout_s:
+        await asyncio.sleep(10)
+        waited += 10
+
+        try:
+            if is_paused():
+                print("  [!] System paused — abandoning the verification wait")
+                return False
+        except Exception:
+            pass
+
+        # Case 1: solved in this very browser (headed run) — Cloudflare
+        # moves the tab on by itself once the check passes.
+        try:
+            if not await _detect_wall(page):
+                print("  [+] Verification cleared in the apply browser — continuing")
+                return True
+        except Exception:
+            pass
+
+        # Case 2: refreshed login-state export from `main.py login`
+        try:
+            mtime = path.stat().st_mtime if path.exists() else 0
+        except Exception:
+            mtime = 0
+        if mtime > baseline:
+            baseline = mtime
+            print("  [*] Refreshed login state detected — importing cookies "
+                  "and retrying")
+            try:
+                await import_login_state(page.context)
+            except Exception:
+                pass
+            try:
+                await page.goto(retry_url, wait_until="domcontentloaded",
+                                timeout=30000)
+                await asyncio.sleep(3)
+            except Exception as e:
+                print(f"  [!] Reload failed: {e}")
+                continue
+            wall = await _detect_wall(page)
+            if not wall:
+                print("  [+] Verification cleared — continuing")
+                return True
+            print(f"  [!] Still walled after cookie import ({wall}) — "
+                  "the clearance may be bound to the solving browser; "
+                  "still waiting")
+
+    print(f"  [!] Timed out waiting for manual verification ({timeout_s}s)")
+    _last_wait_timeout_at = _time.monotonic()
+    return False
+
+
 # ──────────────────────────────────────────────────────────────
 # Apply-surface detection on the viewjob page
 # ──────────────────────────────────────────────────────────────
@@ -721,8 +828,13 @@ async def _fill_wizard(wizard, profile: dict, brain: ClaudeBrain,
 
         wall = await _detect_wall(wizard)
         if wall:
-            print(f"  [!] {wall} — refresh the session with `python3.11 main.py login`")
-            return False
+            print(f"  [!] {wall}")
+            # Frames can't be re-navigated the same way — wait only for pages
+            if not hasattr(wizard, "goto") or \
+                    not await _await_manual_verification(
+                        wizard, getattr(wizard, "url", "") or ""):
+                return False
+            continue  # step re-renders after the reload — re-analyze it
 
         if await _wizard_confirmed(wizard):
             print("  [+] Application submitted successfully!")
@@ -842,6 +954,12 @@ async def apply_indeed(
         except Exception as e:
             print(f"  [!] Failed to load smartapply URL: {e}")
             return {"status": "failed"}
+        await asyncio.sleep(2)
+        wall = await _detect_wall(page)
+        if wall:
+            print(f"  [!] {wall}")
+            if not await _await_manual_verification(page, job_url):
+                return {"status": "failed"}
         ok = await _fill_wizard(page, profile, brain, cover_letter, dry_run,
                                 max_steps=max_steps)
         return {"status": "success" if ok else "failed"}
@@ -856,8 +974,9 @@ async def apply_indeed(
 
     wall = await _detect_wall(page)
     if wall:
-        print(f"  [!] {wall} — refresh the session with `python3.11 main.py login`")
-        return {"status": "failed"}
+        print(f"  [!] {wall}")
+        if not await _await_manual_verification(page, job_url):
+            return {"status": "failed"}
 
     try:
         candidates = await page.evaluate(_SCAN_APPLY_BUTTONS_JS)
