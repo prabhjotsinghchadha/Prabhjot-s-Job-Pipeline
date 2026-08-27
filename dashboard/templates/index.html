@@ -24,7 +24,7 @@
     <script defer src="/static/app.js?v=20260827d"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 
-    <link rel="stylesheet" href="/static/style.css?v=20260827" />
+    <link rel="stylesheet" href="/static/style.css?v=20260827e" />
 </head>
 
 <body x-data="pipeline()" x-init="init()" x-cloak>
@@ -289,7 +289,7 @@
          COMMAND BAR
     ==================================================================== -->
     <header class="sticky top-0 z-50 border-b border-[#1e293b] bg-[#0a0e17]/95 backdrop-blur-md">
-        <div class="max-w-[1600px] mx-auto px-4 py-2.5 flex items-center justify-between">
+        <div class="max-w-[1600px] mx-auto px-3 sm:px-4 py-2.5 flex flex-wrap items-center justify-between gap-y-2">
             <!-- Left: Brand + Status -->
             <div class="flex items-center gap-4">
                 <div class="flex items-center gap-2.5">
@@ -328,16 +328,16 @@
             </div>
 
             <!-- Right: Nav + Actions -->
-            <div class="flex items-center gap-2">
-                <div class="flex items-center gap-1 mr-3 pr-3 border-r border-[#1e293b]">
+            <div class="flex flex-wrap items-center gap-2">
+                <div class="flex items-center gap-1 sm:mr-3 sm:pr-3 sm:border-r border-[#1e293b]">
                     <button @click="switchView('dashboard')" class="nav-tab"
                             :class="currentView === 'dashboard' ? 'active' : ''">DASHBOARD</button>
                     <button @click="switchView('profile')" class="nav-tab"
                             :class="currentView === 'profile' ? 'active' : ''">PROFILE</button>
                 </div>
-                <div class="flex items-center gap-2 mr-3 pr-3 border-r border-[#1e293b]"
+                <div class="flex items-center gap-2 sm:mr-3 sm:pr-3 sm:border-r border-[#1e293b]"
                      x-show="authMode === 'firebase' && authedUser" x-cloak>
-                    <span class="text-[0.62rem] font-mono text-[#64748b]" x-text="authedUser"></span>
+                    <span class="text-[0.62rem] font-mono text-[#64748b] max-w-[140px] truncate" x-text="authedUser"></span>
                     <button @click="logout()" class="nav-tab">LOGOUT</button>
                 </div>
                 <!-- Global pause switch (owner only) — stops ALL automation + Claude usage -->
@@ -353,7 +353,7 @@
                         x-text="discovering ? '> SCANNING...' : '> DISCOVER'"></button>
                 <!-- Apply controls -->
                 <template x-if="!applyState.running">
-                    <div class="flex items-center gap-1 ml-1 pl-2 border-l border-[#1e293b]">
+                    <div class="flex items-center gap-1 sm:ml-1 sm:pl-2 sm:border-l border-[#1e293b]">
                         <button @click="batchApply(true)" :disabled="systemPaused" class="cmd-btn"
                                 style="background:rgba(16,185,129,0.12);color:#34d399;border-color:rgba(16,185,129,0.25);">
                             > DRY RUN
@@ -365,7 +365,7 @@
                     </div>
                 </template>
                 <template x-if="applyState.running">
-                    <div class="flex items-center gap-2 ml-1 pl-2 border-l border-[#1e293b]">
+                    <div class="flex items-center gap-2 sm:ml-1 sm:pl-2 sm:border-l border-[#1e293b]">
                         <span class="text-[0.62rem] font-mono text-emerald-400 animate-pulse">
                             APPLYING <span x-text="applyState.progress.length"></span>/<span x-text="applyState.total || '?'"></span>
                         </span>
@@ -377,7 +377,7 @@
                 </template>
                 <!-- PURGE + IGNORE controls -->
                 <template x-if="!discovering && !scoring && !applyState.running && !yoloState.running">
-                    <div class="flex items-center gap-1.5 ml-1 pl-2 border-l border-[#1e293b]">
+                    <div class="flex items-center gap-1.5 sm:ml-1 sm:pl-2 sm:border-l border-[#1e293b]">
                         <button x-show="selectedJobs.length > 0" @click="ignoreSelected()"
                                 class="cmd-btn text-[0.6rem]"
                                 style="background:rgba(100,116,139,0.15);color:#94a3b8;border-color:rgba(100,116,139,0.3);">
@@ -392,14 +392,14 @@
                 </template>
                 <!-- YOLO controls -->
                 <template x-if="!yoloState.running && !applyState.running">
-                    <div class="ml-1 pl-2 border-l border-[#1e293b]">
+                    <div class="sm:ml-1 sm:pl-2 sm:border-l border-[#1e293b]">
                         <button @click="startYolo()" :disabled="systemPaused" class="cmd-btn yolo-btn">
                             YOLO
                         </button>
                     </div>
                 </template>
                 <template x-if="yoloState.running">
-                    <div class="flex items-center gap-2 ml-1 pl-2 border-l border-[#1e293b]">
+                    <div class="flex items-center gap-2 sm:ml-1 sm:pl-2 sm:border-l border-[#1e293b]">
                         <span class="text-[0.62rem] font-mono animate-pulse"
                               :class="yoloState.phase === 'discover' ? 'text-cyan-400' : yoloState.phase === 'score' ? 'text-violet-400' : yoloState.phase === 'apply' ? 'text-emerald-400' : 'text-amber-400'">
                             YOLO C<span x-text="yoloState.cycle"></span>:
@@ -468,7 +468,7 @@
          x-transition:enter-start="opacity-0 translate-x-4"
          x-transition:enter-end="opacity-100 translate-x-0"
          x-transition:leave="transition ease-in duration-150"
-         class="fixed top-16 right-4 z-[120] max-w-md" x-cloak>
+         class="fixed bottom-4 left-4 right-4 sm:bottom-auto sm:left-auto sm:top-16 sm:right-4 z-[120] sm:max-w-md" x-cloak>
         <div class="toast" :class="notificationType">
             <div class="flex items-center justify-between gap-3">
                 <span x-text="notification"></span>

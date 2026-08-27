@@ -456,6 +456,19 @@ body::after {
   background: rgba(244, 63, 94, 0.1);
 }
 
+/* Compact command bar on phones — buttons wrap into rows, so tighten them up */
+@media (max-width: 640px) {
+  .cmd-btn {
+    padding: 6px 10px;
+    font-size: 0.6rem;
+    letter-spacing: 0.05em;
+  }
+
+  .nav-tab {
+    padding: 5px 8px;
+  }
+}
+
 /* --------------------------------------------------------------------------
    Tag Chips
    -------------------------------------------------------------------------- */
