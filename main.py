@@ -25,12 +25,16 @@ Usage:
 import asyncio
 from utils.browser import headed_supported
 import argparse
+import os
 import random
 import sys
 import yaml
 from pathlib import Path
 
-from playwright.async_api import async_playwright
+try:
+    from playwright.async_api import async_playwright
+except ImportError:  # bare host install — only `login` explains how to fix
+    async_playwright = None
 
 from utils.brain import ClaudeBrain
 from utils.discovery import discover_all_jobs
@@ -192,19 +196,8 @@ async def cmd_apply(profile: dict, dry_run: bool = True):
     print(f"{'='*60}\n")
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=not headed_supported(),  # headed only where a display exists
-            slow_mo=100
-        )
-        context = await browser.new_context(
-            viewport={"width": 1920, "height": 1080},
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            )
-        )
-        page = await context.new_page()
+        from utils.browser import launch_apply_browser
+        page, close_browser = await launch_apply_browser(p)
 
         for i, (job, result) in enumerate(matches):
             if get_today_count() >= max_per_day:
@@ -241,7 +234,7 @@ async def cmd_apply(profile: dict, dry_run: bool = True):
                 print(f"  ⏳ Waiting {delay}s before next application...")
                 await asyncio.sleep(delay)
 
-        await browser.close()
+        await close_browser()
 
     print_stats()
 
@@ -255,11 +248,8 @@ async def cmd_single(profile: dict, url: str, dry_run: bool = True):
     print(f"   Mode: {mode}\n")
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=not headed_supported(), slow_mo=100)
-        context = await browser.new_context(
-            viewport={"width": 1920, "height": 1080}
-        )
-        page = await context.new_page()
+        from utils.browser import launch_apply_browser
+        page, close_browser = await launch_apply_browser(p)
 
         await apply_smart(page, url, profile, brain, dry_run=dry_run)
 
@@ -270,7 +260,143 @@ async def cmd_single(profile: dict, url: str, dry_run: bool = True):
             except KeyboardInterrupt:
                 pass
 
-        await browser.close()
+        await close_browser()
+
+
+async def cmd_login(url: str):
+    """
+    Open the persistent apply browser HEADED so the user can log in to job
+    sites once (LinkedIn, Indeed, Google, Workday accounts, ...). On exit,
+    exports a portable session snapshot (Playwright storage_state) that the
+    headless/Docker apply browser imports on every launch — cookies can't
+    cross the macOS/Linux boundary inside the raw profile, but this file can.
+    """
+    import subprocess
+    from utils.browser import (
+        find_chrome_executable, login_profile_dir, login_state_path,
+        export_profile_state,
+    )
+
+    if not headed_supported():
+        print("❌ No display available. Run this on your desktop (macOS), "
+              "not inside Docker/SSH.")
+        return
+
+    if async_playwright is None:
+        print("❌ Playwright is not installed for this Python. One-time setup:")
+        print("     python3.11 -m pip install playwright")
+        print("     python3.11 -m playwright install chromium")
+        return
+
+    chrome = find_chrome_executable()
+    if not chrome:
+        # No real Chrome — fall back to a Playwright-driven window
+        await _cmd_login_playwright_fallback(url)
+        return
+
+    profile_dir = login_profile_dir()
+    state_path = login_state_path()
+
+    # NATIVE flow: the window the user browses in is plain Chrome with zero
+    # automation flags — full speed, sandbox intact, no warning bar, nothing
+    # for Google to detect. Playwright only touches the profile headlessly
+    # before (seed previous sessions in) and after (export cookies out).
+    async with async_playwright() as p:
+        if state_path.exists():
+            try:
+                n = await export_profile_state(p, profile_dir, state_path,
+                                               seed_state=True)
+                if n:
+                    print(f"  🔐 Carried over {n} previously saved session cookie(s)")
+            except Exception as e:
+                print(f"  ⚠ Could not carry over previous sessions ({e}) — "
+                      f"you may need to log in again")
+
+        proc = subprocess.Popen(
+            [chrome, f"--user-data-dir={profile_dir}",
+             "--no-first-run", "--no-default-browser-check", url],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+        print("\n" + "=" * 60)
+        print("🔐 LOGIN BROWSER (your real Chrome — full speed, no flags)")
+        print("=" * 60)
+        print("Log in to any job sites you need in the window that opened —")
+        print("LinkedIn, Indeed, Google, workatastartup.com, Workday, ...")
+        print("Open more tabs and sites freely. This window is separate from")
+        print("your personal Chrome profile.")
+        print("\nWhen you're done:")
+        print("\n   >>> come back here and press ENTER to save & exit <<<\n")
+
+        try:
+            await asyncio.to_thread(input)
+        except (KeyboardInterrupt, EOFError):
+            pass
+
+        print("  Closing the login window and exporting sessions...")
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        await asyncio.sleep(1)  # let Chrome finish flushing the profile
+
+        try:
+            count = await export_profile_state(p, profile_dir, state_path)
+            print(f"\n✅ Saved {count} session cookie(s) to {state_path}")
+            print("   Headless/Docker apply sessions import these automatically.")
+            print("   Hosted (Railway) instance: upload this file via PROFILE →")
+            print("   BROWSER SESSIONS → UPLOAD SESSIONS FILE.")
+        except Exception as e:
+            print(f"⚠ Could not export session state: {e}")
+
+
+async def _cmd_login_playwright_fallback(url: str):
+    """Login window via Playwright's bundled Chromium (no real Chrome found)."""
+    from utils.browser import launch_login_browser, login_state_path
+
+    async with async_playwright() as p:
+        try:
+            page, close = await launch_login_browser(p)
+        except Exception as e:
+            print(f"❌ Could not open the login browser: {e}")
+            print("   Is another login window already running?")
+            return
+
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        except Exception:
+            pass  # slow site — the window is open, which is what matters
+
+        print("\n" + "=" * 60)
+        print("🔐 LOGIN BROWSER")
+        print("=" * 60)
+        print("Log in to any job sites you need in the browser window.")
+        print("Google sign-in may refuse this automated window — use the")
+        print("site's own email+password login instead.")
+        print("\nWhen you're done, keep the window OPEN and:")
+        print("\n   >>> come back here and press ENTER to save & exit <<<\n")
+
+        try:
+            await asyncio.to_thread(input)
+        except (KeyboardInterrupt, EOFError):
+            pass
+
+        try:
+            state_path = login_state_path()
+            state = await page.context.storage_state(path=str(state_path))
+            os.chmod(state_path, 0o600)
+            print(f"\n✅ Saved {len(state.get('cookies', []))} session cookie(s) "
+                  f"to {state_path}")
+        except Exception as e:
+            print(f"⚠ Could not export session state: {e}")
+            print("  (Did you close the browser window? Leave it open and press ENTER instead.)")
+
+        try:
+            await close()
+        except Exception:
+            pass
 
 
 def cmd_reset():
@@ -380,6 +506,15 @@ Examples:
     single_parser.add_argument("--live", action="store_true",
                                help="Actually submit (default: dry run)")
 
+    # login
+    login_parser = subparsers.add_parser(
+        "login",
+        help="Open a browser to log in to job sites once — sessions are "
+             "saved and reused by every apply run (incl. Docker)")
+    login_parser.add_argument(
+        "url", nargs="?", default="https://www.linkedin.com/login",
+        help="Site to open first (default: LinkedIn login)")
+
     # stats
     subparsers.add_parser("stats", help="View application stats")
 
@@ -402,6 +537,10 @@ Examples:
 
     if args.command == "reset":
         cmd_reset()
+        return
+
+    if args.command == "login":
+        asyncio.run(cmd_login(args.url))
         return
 
     if args.command == "server":
