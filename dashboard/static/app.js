@@ -19,6 +19,9 @@ function pipeline() {
     loginError: "",
     loginBusy: false,
     _appStarted: false,
+    _initRan: false,
+    _authReady: null, // resolves once Firebase settles the initial auth state
+    _authReadyResolve: null,
 
     // ----- Core State -----
     jobs: [],
@@ -217,6 +220,12 @@ function pipeline() {
     // ===================================================================
 
     async init() {
+      // Alpine v3 auto-calls init() AND the body has x-init="init()" — without
+      // this guard the whole bootstrap (including Firebase setup) runs twice
+      // concurrently, and the losing copy reaches startApp() before the saved
+      // session is restored, 401s, and signs the user out.
+      if (this._initRan) return;
+      this._initRan = true;
       await this.initAuth();
       // In Firebase mode the login overlay owns the screen until sign-in;
       // onAuthStateChanged calls startApp() once a user is present.
@@ -240,8 +249,13 @@ function pipeline() {
           "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js",
         );
         firebase.initializeApp(cfg.firebase);
+        this._authReady = new Promise((res) => (this._authReadyResolve = res));
         this._installFetchAuth();
         firebase.auth().onAuthStateChanged((user) => {
+          if (this._authReadyResolve) {
+            this._authReadyResolve();
+            this._authReadyResolve = null;
+          }
           if (user) {
             this.authedUser = user.email || user.displayName || "user";
             this.loginError = "";
@@ -274,15 +288,22 @@ function pipeline() {
       // Attach a fresh Firebase ID token to every same-origin API call.
       // getIdToken() returns the cached token until near expiry, then
       // refreshes — so hour-long sessions keep working.
+      // Waits for the initial auth state to settle first, so a page reload
+      // never fires an /api call without its token while the saved session
+      // is still being restored from IndexedDB.
       const orig = window.fetch.bind(window);
       window.fetch = async (input, init = {}) => {
         const url = typeof input === "string" ? input : input.url;
-        if (url.startsWith("/api/") && firebase.auth().currentUser) {
-          const token = await firebase.auth().currentUser.getIdToken();
-          init.headers = {
-            ...(init.headers || {}),
-            Authorization: `Bearer ${token}`,
-          };
+        if (url.startsWith("/api/") && url !== "/api/config") {
+          if (this._authReady) await this._authReady;
+          const user = firebase.auth().currentUser;
+          if (user) {
+            const token = await user.getIdToken();
+            init.headers = {
+              ...(init.headers || {}),
+              Authorization: `Bearer ${token}`,
+            };
+          }
         }
         return orig(input, init);
       };
@@ -334,11 +355,25 @@ function pipeline() {
       try {
         const res = await fetch("/api/profile");
         if (res.status === 401 && this.authMode === "firebase") {
-          // Signed in to Firebase but rejected by the server (allowlist).
           const body = await res.json().catch(() => ({}));
+          const detail = body.detail || "";
+          if (/allowlist|not allowed/i.test(detail)) {
+            // Signed in to Firebase but rejected by the server (allowlist).
+            this._appStarted = false;
+            this.loginError = detail || "This account is not allowed here.";
+            await firebase.auth().signOut();
+            return;
+          }
+          // Any other 401 is a transient token hiccup (still restoring or
+          // mid-refresh). Signing out here would destroy the saved session —
+          // retry once instead.
           this._appStarted = false;
-          this.loginError = body.detail || "This account is not allowed here.";
-          await firebase.auth().signOut();
+          setTimeout(() => {
+            if (!this._appStarted && firebase.auth().currentUser) {
+              this._appStarted = true;
+              this.startApp();
+            }
+          }, 1500);
           return;
         }
         const data = await res.json();
