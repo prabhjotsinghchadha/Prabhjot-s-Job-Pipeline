@@ -17,6 +17,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from utils import usercontext
+from utils.system_state import is_paused
 
 scheduler = AsyncIOScheduler()
 # Keyed by uid so one tenant's run summary is never shown to another.
@@ -120,6 +121,9 @@ async def _score_for_current_user():
         scored = 0
 
         for job_row in unscored:
+            if is_paused():
+                print("[Scheduler] System paused — stopping scoring mid-run")
+                break
             try:
                 desc = job_row.get("description", "") or f"Job: {job_row['title']} at {job_row['company']}"
                 # Off the event loop — match_job blocks on a `claude -p` subprocess
@@ -176,19 +180,34 @@ async def _follow_up_check_for_current_user():
         print(f"[Scheduler] Follow-up check failed: {e}")
 
 
+def _skip_if_paused(job_name: str) -> bool:
+    if is_paused():
+        print(f"[Scheduler] System paused — skipping {job_name}")
+        return True
+    return False
+
+
 async def scheduled_discover():
+    if _skip_if_paused("discovery"):
+        return
     await _for_each_user(_discover_for_current_user)
 
 
 async def scheduled_score():
+    if _skip_if_paused("scoring"):
+        return
     await _for_each_user(_score_for_current_user)
 
 
 async def scheduled_email_check():
+    if _skip_if_paused("email check"):
+        return
     await _for_each_user(_email_check_for_current_user)
 
 
 async def scheduled_follow_up_check():
+    if _skip_if_paused("follow-up check"):
+        return
     await _for_each_user(_follow_up_check_for_current_user)
 
 
@@ -282,6 +301,7 @@ def get_scheduler_status() -> dict:
         pass
     return {
         "running": scheduler.running if hasattr(scheduler, 'running') else False,
+        "paused": is_paused(),
         "jobs": jobs_info,
         "last_results": _results(),
     }

@@ -100,6 +100,7 @@ from fastapi.responses import Response, JSONResponse
 
 from utils import usercontext
 from utils.usercontext import multi_tenant_enabled
+from utils.system_state import get_state as get_system_state, is_paused, set_paused
 
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "admin")
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
@@ -130,6 +131,71 @@ def _resolve_firebase_user(auth_header: Optional[str]) -> dict:
     if not auth_header or not auth_header.lower().startswith("bearer "):
         raise AuthError("Missing bearer token")
     return verify_firebase_token(auth_header.split(" ", 1)[1])
+
+
+# ---------------------------------------------------------------------------
+# Global pause switch — while paused, endpoints that start automated or
+# Claude-token-consuming work return 409. Reads, CRUD, cancel endpoints, and
+# the pause/resume controls themselves stay available so the dashboard keeps
+# working. Registered before the auth middleware so auth still runs first.
+# ---------------------------------------------------------------------------
+_PAUSE_GATED_EXACT = {
+    "/api/discover",
+    "/api/score-all",
+    "/api/check-email",
+    "/api/profile/score",
+    "/api/yolo",
+    "/api/apply-batch",
+}
+_PAUSE_GATED_PREFIXES = (
+    "/api/rescore/",
+    "/api/scheduler/trigger/",
+    "/api/apply/",
+    "/api/resolve-url/",
+)
+_PAUSE_EXEMPT = {"/api/apply/cancel"}
+
+# Who may flip the switch. The pause protects the deployer's Claude OAuth
+# token, so in multi-tenant mode only the owner account(s) listed here can
+# operate it — but a pause stops background work for EVERY user. Legacy
+# single-user mode (the deployer is the only user) is always allowed.
+ADMIN_EMAILS = {
+    e.strip().lower()
+    for e in os.environ.get("ADMIN_EMAILS", "prabhjottechs@gmail.com").split(",")
+    if e.strip()
+}
+
+
+def _is_admin_user() -> bool:
+    if not multi_tenant_enabled():
+        return True
+    try:
+        return usercontext.get_current_user().get("email", "").lower() in ADMIN_EMAILS
+    except Exception:
+        return False
+
+
+_PAUSED_DETAIL = (
+    "System is paused — no automation or Claude usage until resumed. "
+    "Press RESUME on the dashboard to continue."
+)
+
+
+def _pause_gated(path: str, method: str) -> bool:
+    if method != "POST" or path in _PAUSE_EXEMPT:
+        return False
+    if path in _PAUSE_GATED_EXACT:
+        return True
+    if path.startswith("/api/jobs/") and path.endswith("/tailor"):
+        return True
+    return path.startswith(_PAUSE_GATED_PREFIXES)
+
+
+@app.middleware("http")
+async def _pause_middleware(request: Request, call_next):
+    if _pause_gated(request.url.path, request.method) and is_paused():
+        return JSONResponse({"detail": _PAUSED_DETAIL}, status_code=409)
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -980,6 +1046,8 @@ async def score_all_unscored() -> dict:
             consecutive_failures = 0
             last_error = ""
             for job_row in unscored:
+                if is_paused():
+                    break
                 try:
                     desc = (
                         job_row.get("description", "")
@@ -1237,7 +1305,7 @@ async def apply_batch(body: dict = {}) -> dict:
 
                 applied_count = 0
                 for i, job in enumerate(eligible):
-                    if _apply_state()["cancel_requested"]:
+                    if _apply_state()["cancel_requested"] or is_paused():
                         await broadcast_event({
                             "type": "apply_batch_cancelled",
                             "data": {"applied": applied_count, "cancelled_at": i}
@@ -1472,7 +1540,7 @@ async def start_yolo(body: dict = {}) -> dict:
 
         try:
             while True:
-                if _yolo_state()["cancel_requested"]:
+                if _yolo_state()["cancel_requested"] or is_paused():
                     ylog("YOLO cancelled by user.", "warn")
                     await broadcast_event({"type": "yolo_cancelled", "data": {}})
                     break
@@ -1509,7 +1577,7 @@ async def start_yolo(body: dict = {}) -> dict:
                     ylog(f"Discovery error: {e}", "error")
                     await broadcast_event({"type": "yolo_error", "data": {"phase": "discover", "error": str(e)}})
 
-                if _yolo_state()["cancel_requested"]:
+                if _yolo_state()["cancel_requested"] or is_paused():
                     break
 
                 # --- PHASE 2: SCORE ---
@@ -1528,7 +1596,7 @@ async def start_yolo(body: dict = {}) -> dict:
                     scored_count = 0
 
                     for job_row in unscored:
-                        if _yolo_state()["cancel_requested"]:
+                        if _yolo_state()["cancel_requested"] or is_paused():
                             break
                         try:
                             desc = (
@@ -1554,7 +1622,7 @@ async def start_yolo(body: dict = {}) -> dict:
                     ylog(f"Scoring error: {e}", "error")
                     await broadcast_event({"type": "yolo_error", "data": {"phase": "score", "error": str(e)}})
 
-                if _yolo_state()["cancel_requested"]:
+                if _yolo_state()["cancel_requested"] or is_paused():
                     break
 
                 # --- PHASE 3: APPLY ---
@@ -1604,7 +1672,7 @@ async def start_yolo(body: dict = {}) -> dict:
                             applied_count = 0
 
                             for i, job in enumerate(eligible):
-                                if _yolo_state()["cancel_requested"]:
+                                if _yolo_state()["cancel_requested"] or is_paused():
                                     break
 
                                 job_id = job["id"]
@@ -1689,7 +1757,7 @@ async def start_yolo(body: dict = {}) -> dict:
 
                 # Sleep in small increments so cancel is responsive
                 for _ in range(interval_min * 6):  # check every 10 seconds
-                    if _yolo_state()["cancel_requested"]:
+                    if _yolo_state()["cancel_requested"] or is_paused():
                         break
                     await asyncio.sleep(10)
 
@@ -1769,6 +1837,50 @@ async def ingest_mcp_jobs(body: dict) -> dict:
 
 
 # ===========================================================================
+# REST API — System pause switch
+# ===========================================================================
+
+@app.get("/api/system/state")
+async def system_state() -> dict:
+    """Global pause state + whether the caller may operate the switch."""
+    state = get_system_state()
+    state["pause_control"] = _is_admin_user()
+    return state
+
+
+@app.post("/api/system/pause")
+async def system_pause() -> dict:
+    """
+    Pause everything, for every user: scheduled jobs skip their runs,
+    in-flight scoring / YOLO / batch-apply loops stop at their next
+    checkpoint, and endpoints that would spend Claude tokens or drive a
+    browser return 409 until resumed. Owner accounts only.
+    """
+    if not _is_admin_user():
+        raise HTTPException(status_code=403, detail="Only the system owner can pause the system")
+    by = ""
+    try:
+        by = usercontext.get_current_user().get("email", "")
+    except Exception:
+        pass
+    state = set_paused(True, by=by)
+    await broadcast_event({"type": "system_state", "data": state})
+    print(f"[System] PAUSED by {by or 'owner'} — all automation and Claude usage stopped")
+    return state
+
+
+@app.post("/api/system/resume")
+async def system_resume() -> dict:
+    """Resume normal operation — the scheduler picks up at each job's next tick."""
+    if not _is_admin_user():
+        raise HTTPException(status_code=403, detail="Only the system owner can resume the system")
+    state = set_paused(False)
+    await broadcast_event({"type": "system_state", "data": state})
+    print("[System] RESUMED — automation active again")
+    return state
+
+
+# ===========================================================================
 # REST API — Scheduler
 # ===========================================================================
 
@@ -1777,9 +1889,11 @@ async def scheduler_status() -> dict:
     """Return scheduler state: running flag, job next-run times, last results."""
     try:
         from scheduler import get_scheduler_status
-        return get_scheduler_status()
+        status = get_scheduler_status()
     except Exception:
-        return {"running": False, "jobs": [], "last_results": {}}
+        status = {"running": False, "jobs": [], "last_results": {}, "paused": is_paused()}
+    status["pause_control"] = _is_admin_user()
+    return status
 
 
 @app.post("/api/scheduler/trigger/{job_name}")

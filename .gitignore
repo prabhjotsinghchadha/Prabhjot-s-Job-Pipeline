@@ -46,3 +46,4 @@ profile.yaml
 
 # Node (Railway IaC SDK only)
 node_modules/
+system_state.json

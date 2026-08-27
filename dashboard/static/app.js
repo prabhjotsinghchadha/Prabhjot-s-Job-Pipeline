@@ -50,6 +50,11 @@ function pipeline() {
     _schedulerTimer: null,
     _countdownTimer: null,
 
+    // ----- System Pause (global kill switch — owner only) -----
+    systemPaused: false,
+    pauseControl: false, // whether the signed-in user may pause/resume
+    pauseToggling: false,
+
     // ----- Profile Editing -----
     _sidebarSaveTimer: null,
     sidebarSaving: false,
@@ -560,7 +565,46 @@ function pipeline() {
           job.countdown = this._formatCountdown(job._nextRunMs);
         }
         this.schedulerData = data;
+        if ("paused" in data) this.setSystemPaused(!!data.paused);
+        if ("pause_control" in data) this.pauseControl = !!data.pause_control;
       } catch (_) {}
+    },
+
+    // ===================================================================
+    // SYSTEM PAUSE — global kill switch to stop all Claude usage
+    // ===================================================================
+
+    setSystemPaused(paused) {
+      if (paused === this.systemPaused) return;
+      this.systemPaused = paused;
+      this.addFeedItem(
+        paused
+          ? "SYSTEM PAUSED — all automation and Claude usage stopped."
+          : "System resumed — automation active again.",
+        paused ? "#f59e0b" : "#10b981",
+      );
+    },
+
+    async toggleSystemPause() {
+      const action = this.systemPaused ? "resume" : "pause";
+      this.pauseToggling = true;
+      try {
+        const res = await fetch(`/api/system/${action}`, { method: "POST" });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        this.setSystemPaused(!!data.paused);
+        this.notify(
+          data.paused
+            ? "System paused. Nothing will use your Claude tokens until you resume."
+            : "System resumed. Scheduler is active again.",
+          data.paused ? "info" : "success",
+        );
+        this.fetchSchedulerStatus();
+      } catch (err) {
+        this.notify(`Failed to ${action}: ${err.message}`, "error");
+      } finally {
+        this.pauseToggling = false;
+      }
     },
 
     // ===================================================================
@@ -642,6 +686,11 @@ function pipeline() {
       try {
         const res = await fetch("/api/discover", { method: "POST" });
         const data = await res.json();
+        if (res.status === 409) {
+          this.discovering = false;
+          this.notify(data.detail || "System is paused.", "error");
+          return;
+        }
         if (data.status === "already_running") {
           this.notify("A discovery scan is already running.", "info");
           return;
@@ -667,6 +716,11 @@ function pipeline() {
       try {
         const res = await fetch("/api/score-all", { method: "POST" });
         const data = await res.json();
+        if (res.status === 409) {
+          this.scoring = false;
+          this.notify(data.detail || "System is paused.", "error");
+          return;
+        }
         if (data.count === 0) {
           this.scoring = false;
           this.notify("No unscored targets found.", "info");
@@ -1288,6 +1342,10 @@ function pipeline() {
 
     handleServerEvent(event) {
       switch (event.type) {
+        case "system_state":
+          this.setSystemPaused(!!event.data.paused);
+          break;
+
         case "discovery_started":
           this.discovering = true;
           this.addFeedItem("Discovery scan in progress...", "#22d3ee");

@@ -131,9 +131,26 @@ GET    /api/statuses               — Valid status values
 GET    /api/profile                — Read profile.yaml
 PATCH  /api/profile                — Update profile.yaml
 GET    /api/sources                — Discovery source catalog + enabled state (toggle via PATCH /api/profile {"sources": {...}})
-GET    /api/scheduler/status       — Scheduler state + next run times
+GET    /api/scheduler/status       — Scheduler state + next run times (includes global "paused" flag)
 POST   /api/scheduler/trigger/{job}— Manually trigger scheduler job
+GET    /api/system/state           — Global pause state (+ whether caller may control it)
+POST   /api/system/pause           — KILL SWITCH: stop ALL automation + Claude usage (owner only, all users)
+POST   /api/system/resume          — Resume automation (owner only)
 ```
+
+### Global Pause Switch (Claude token saver)
+
+The system has a global pause switch for hosted deployments (Railway runs 24/7
+on the deployer's Claude OAuth token). State lives in `system_state.json` at
+`DATA_DIR` (Railway: the /data volume — survives restarts and redeploys).
+While paused: scheduled jobs skip their runs, in-flight scoring/YOLO/batch-apply
+loops stop at their next checkpoint, and every automation endpoint (discover,
+score-all, rescore, tailor, apply, yolo, check-email, resolve-url) returns 409.
+Reads, CRUD, and cancel endpoints stay live. In multi-tenant mode only owner
+accounts (`ADMIN_EMAILS` env var, default `prabhjottechs@gmail.com`) can flip
+the switch, but a pause stops background work for EVERY user; legacy
+single-user mode can always flip it. Dashboard: `⏸ PAUSE ALL` / `▶ RESUME`
+button in the header. Module: `utils/system_state.py`.
 
 ---
 

@@ -21,7 +21,7 @@
     </script>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-    <script defer src="/static/app.js?v=20260827b"></script>
+    <script defer src="/static/app.js?v=20260827c"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 
     <link rel="stylesheet" href="/static/style.css?v=20260827" />
@@ -312,9 +312,13 @@
                               :class="wsConnected ? 'text-emerald-400' : 'text-rose-400'"
                               x-text="wsConnected ? 'LIVE' : 'OFFLINE'"></span>
                     </div>
-                    <div class="flex items-center gap-1.5" x-show="schedulerData.running">
+                    <div class="flex items-center gap-1.5" x-show="schedulerData.running && !systemPaused">
                         <span class="status-dot idle"></span>
                         <span class="text-[0.62rem] font-mono uppercase tracking-wider text-amber-400">SCHED</span>
+                    </div>
+                    <div class="flex items-center gap-1.5" x-show="systemPaused" x-cloak>
+                        <span class="status-dot dead"></span>
+                        <span class="text-[0.62rem] font-mono uppercase tracking-wider text-amber-400 animate-pulse">PAUSED</span>
                     </div>
                     <div class="flex items-center gap-1.5" x-show="discovering">
                         <span class="status-dot live"></span>
@@ -336,18 +340,25 @@
                     <span class="text-[0.62rem] font-mono text-[#64748b]" x-text="authedUser"></span>
                     <button @click="logout()" class="nav-tab">LOGOUT</button>
                 </div>
-                <button @click="scoreAll()" :disabled="scoring" class="cmd-btn secondary"
+                <!-- Global pause switch (owner only) — stops ALL automation + Claude usage -->
+                <button x-show="pauseControl" x-cloak
+                        @click="toggleSystemPause()" :disabled="pauseToggling" class="cmd-btn"
+                        :style="systemPaused
+                            ? 'background:rgba(16,185,129,0.18);color:#34d399;border-color:rgba(16,185,129,0.4);'
+                            : 'background:rgba(245,158,11,0.12);color:#fbbf24;border-color:rgba(245,158,11,0.3);'"
+                        x-text="pauseToggling ? '...' : (systemPaused ? '▶ RESUME' : '⏸ PAUSE ALL')"></button>
+                <button @click="scoreAll()" :disabled="scoring || systemPaused" class="cmd-btn secondary"
                         x-text="scoring ? '> SCORING...' : '> SCORE ALL'"></button>
-                <button @click="discover()" :disabled="discovering" class="cmd-btn primary"
+                <button @click="discover()" :disabled="discovering || systemPaused" class="cmd-btn primary"
                         x-text="discovering ? '> SCANNING...' : '> DISCOVER'"></button>
                 <!-- Apply controls -->
                 <template x-if="!applyState.running">
                     <div class="flex items-center gap-1 ml-1 pl-2 border-l border-[#1e293b]">
-                        <button @click="batchApply(true)" class="cmd-btn"
+                        <button @click="batchApply(true)" :disabled="systemPaused" class="cmd-btn"
                                 style="background:rgba(16,185,129,0.12);color:#34d399;border-color:rgba(16,185,129,0.25);">
                             > DRY RUN
                         </button>
-                        <button @click="batchApply(false)" class="cmd-btn"
+                        <button @click="batchApply(false)" :disabled="systemPaused" class="cmd-btn"
                                 style="background:rgba(16,185,129,0.2);color:#10b981;border-color:rgba(16,185,129,0.35);">
                             > APPLY
                         </button>
@@ -382,7 +393,7 @@
                 <!-- YOLO controls -->
                 <template x-if="!yoloState.running && !applyState.running">
                     <div class="ml-1 pl-2 border-l border-[#1e293b]">
-                        <button @click="startYolo()" class="cmd-btn yolo-btn">
+                        <button @click="startYolo()" :disabled="systemPaused" class="cmd-btn yolo-btn">
                             YOLO
                         </button>
                     </div>
@@ -403,6 +414,20 @@
             </div>
         </div>
     </header>
+
+    <!-- System Paused banner -->
+    <div x-show="systemPaused" x-cloak class="border-b border-amber-500/30 bg-amber-500/10">
+        <div class="max-w-[1600px] mx-auto px-4 py-1.5 flex items-center gap-3">
+            <span class="text-[0.65rem] font-mono uppercase tracking-[0.15em] text-amber-400">
+                &#9208; SYSTEM PAUSED — scheduler, discovery, scoring, and applies are stopped. Zero Claude token usage until resumed.
+            </span>
+            <button x-show="pauseControl" @click="toggleSystemPause()" :disabled="pauseToggling"
+                    class="ml-auto cmd-btn text-[0.6rem]"
+                    style="background:rgba(16,185,129,0.18);color:#34d399;border-color:rgba(16,185,129,0.4);">
+                &#9654; RESUME
+            </button>
+        </div>
+    </div>
 
     <!-- YOLO Log Overlay -->
     <div x-show="showYoloLog" x-transition
@@ -503,8 +528,12 @@
                     <div class="mc-panel-header">
                         <span class="dot" style="background:var(--amber);box-shadow:0 0 6px rgba(245,158,11,0.4)"></span>
                         SCHEDULER
+                        <span x-show="systemPaused" x-cloak
+                              class="ml-auto text-[0.6rem] font-mono uppercase tracking-wider text-amber-400 animate-pulse">
+                            &#9208; PAUSED
+                        </span>
                     </div>
-                    <div class="p-3 space-y-2">
+                    <div class="p-3 space-y-2" :class="systemPaused ? 'opacity-50' : ''">
                         <template x-for="job in schedulerData.jobs" :key="job.id">
                             <div class="flex items-center justify-between text-[0.7rem] font-mono py-1.5 border-b border-[#1e293b] last:border-0">
                                 <div>
