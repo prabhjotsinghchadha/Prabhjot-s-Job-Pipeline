@@ -6,7 +6,15 @@ fill instructions. This is the fallback for sites without a dedicated adapter.
 """
 
 import random
+import re
 from playwright.async_api import Page
+
+# Buttons that finalize an application — in dry-run these must NEVER be
+# clicked, no matter how the AI labeled the step.
+_SUBMIT_BTN_RX = re.compile(
+    r"submit|send|apply now|apply\b|finish|complete application|reach out",
+    re.IGNORECASE,
+)
 from utils.brain import ClaudeBrain
 from utils.answers import find_cached_answer, get_personal_field
 
@@ -29,6 +37,18 @@ async def apply_generic(
     print(f"  📝 Loading application page...")
     await page.goto(job_url, wait_until="networkidle")
     await page.wait_for_timeout(2000)
+    # Client-rendered apps (React/Inertia, e.g. Work at a Startup) hydrate
+    # after networkidle — snapshotting too early sees only the server shell
+    # (a data-page JSON blob and scripts, no buttons). Wait until the DOM
+    # actually has interactive elements.
+    try:
+        await page.wait_for_function(
+            "() => document.querySelectorAll('button, input, select, textarea').length > 3",
+            timeout=8000,
+        )
+        await page.wait_for_timeout(500)
+    except Exception:
+        pass  # static page or slow app — proceed with what's there
 
     step = 0
     while step < max_wizard_steps:
@@ -37,6 +57,17 @@ async def apply_generic(
 
         # Grab current visible form HTML
         form_html = await page.evaluate("""() => {
+            // Strip payload blobs so the size-truncated snapshot keeps UI
+            // structure: scripts/styles and framework data attributes
+            // (Inertia's data-page JSON can alone exceed the size budget).
+            const cleaned = (el) => {
+                const clone = el.cloneNode(true);
+                clone.querySelectorAll('script, style, svg, noscript')
+                     .forEach(n => n.remove());
+                [clone, ...clone.querySelectorAll('[data-page]')]
+                    .forEach(n => n.removeAttribute && n.removeAttribute('data-page'));
+                return clone.outerHTML;
+            };
             // Try to find the most relevant form container
             const selectors = [
                 '[role="dialog"]',
@@ -49,10 +80,10 @@ async def apply_generic(
             for (const sel of selectors) {
                 const el = document.querySelector(sel);
                 if (el && el.innerHTML.length > 100) {
-                    return el.outerHTML;
+                    return cleaned(el);
                 }
             }
-            return document.body.innerHTML;
+            return cleaned(document.body);
         }""")
 
         # Truncate for CLI context limits
@@ -86,7 +117,10 @@ Analyze the form and return a JSON object:
 
 Rules:
 - status "done" = form already submitted / confirmation page
-- status "no_form" = no application form found
+- status "no_form" = no application form AND no way to reach one from here
+- If there is no form yet but an Apply / Apply Now button likely opens or
+  reveals the application form (modal or next page), return "fill_and_next"
+  with an empty fields list and that button as next_button
 - Use robust CSS selectors (prefer #id, [name=...], [aria-label=...])
 - For file uploads, set file_key to "resume"
 - Put the most standard fields first (name, email, phone)
@@ -154,6 +188,16 @@ Rules:
             try:
                 btn = await page.wait_for_selector(next_btn_selector, timeout=5000)
                 if btn:
+                    if dry_run:
+                        # Defense in depth: the status label above comes from
+                        # the AI and can be wrong (a Send button labeled
+                        # "fill_and_next" once submitted a real application
+                        # in dry-run). Check what the button actually says.
+                        label = ((await btn.inner_text()) or "").strip()
+                        if _SUBMIT_BTN_RX.search(label):
+                            print(f"  🏁 DRY RUN — refusing to click "
+                                  f"'{label or next_btn_selector}' (submit-like button)")
+                            return True
                     if status == "submit":
                         print(f"  🚀 Submitting...")
                     else:

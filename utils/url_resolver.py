@@ -189,6 +189,20 @@ async def _follow_redirects(page, url: str, timeout: int = 15000) -> Optional[st
         return None
 
 
+# "Apply" links that are NOT job applications — nav/footer links that the
+# href*="apply" heuristic would otherwise happily grab.
+_BOGUS_APPLY_PATTERNS = (
+    "ycombinator.com/apply",   # YC accelerator application (site header), not a job
+    "apply.ycombinator.com",
+    "/login", "/signin", "/sign-in", "/signup", "/sign-up", "/register",
+)
+
+
+def _is_bogus_apply_link(href: str) -> bool:
+    lower = (href or "").lower()
+    return any(pat in lower for pat in _BOGUS_APPLY_PATTERNS)
+
+
 async def _extract_apply_link(page, timeout: int = 5000) -> Optional[str]:
     """
     Look for "Apply" or "Apply Now" links/buttons on the current page.
@@ -205,6 +219,7 @@ async def _extract_apply_link(page, timeout: int = 5000) -> Optional[str]:
             'a[href*="icims.com"]',
             'a[href*="smartrecruiters.com"]',
             'a[href*="jobvite.com"]',
+            'a[href*="workatastartup.com/jobs"]',  # job-specific WaaS links only
             # Generic apply buttons/links
             'a[href*="apply"]',
             'a[href*="application"]',
@@ -215,6 +230,8 @@ async def _extract_apply_link(page, timeout: int = 5000) -> Optional[str]:
                 link = await page.wait_for_selector(selector, timeout=2000)
                 if link:
                     href = await link.get_attribute("href")
+                    if _is_bogus_apply_link(href):
+                        continue
                     if href and href.startswith("http"):
                         if is_ats_url(href):
                             logger.info(f"Found ATS apply link: {href}")
@@ -246,13 +263,16 @@ async def _extract_apply_link(page, timeout: int = 5000) -> Optional[str]:
         )
 
         if apply_links:
+            apply_links = [l for l in apply_links
+                           if not _is_bogus_apply_link(l["href"])]
             # Prefer ATS links
             for link in apply_links:
                 if is_ats_url(link["href"]):
                     logger.info(f"Found ATS apply link via JS: {link['href']}")
                     return link["href"]
             # Return first apply link
-            return apply_links[0]["href"]
+            if apply_links:
+                return apply_links[0]["href"]
 
     except Exception as e:
         logger.debug(f"Apply link extraction failed: {e}")
@@ -327,6 +347,30 @@ async def resolve_apply_url(
     if is_ats_url(job_url):
         result["resolution"] = "ats_direct"
         logger.debug(f"Already ATS URL: {job_url}")
+        return result
+
+    # ─── YC jobs: resolve to the Work-at-a-Startup job page ─────────────────
+    # ycombinator.com job pages embed a WaaS job id; their visible apply link
+    # routes through account.ycombinator.com/authenticate (a login wall to an
+    # automated visitor). The workatastartup.com job page is the real apply
+    # surface — with the user's WaaS session it shows a working Apply button.
+    if re.search(r"ycombinator\.com/companies/[^/]+/jobs/", job_url):
+        try:
+            await page.goto(job_url, wait_until="domcontentloaded", timeout=15000)
+            await asyncio.sleep(1.5)
+            html = await page.content()
+            m = re.search(r"signup_job_id(?:%3D|=)(\d+)", html)
+            if m:
+                result["resolved_url"] = f"https://www.workatastartup.com/jobs/{m.group(1)}"
+                result["resolution"] = "yc_waas"
+                logger.info(f"YC job -> WaaS: {result['resolved_url']}")
+                return result
+        except Exception as e:
+            logger.warning(f"WaaS id extraction failed for {job_url}: {e}")
+        result["resolution"] = "yc_direct"  # job page itself, best effort
+        return result
+    if "workatastartup.com/jobs/" in job_url:
+        result["resolution"] = "yc_direct"
         return result
 
     # ─── Strategy 2: Company → ATS lookup ────────────────────────────────────
