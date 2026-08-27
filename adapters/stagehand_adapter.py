@@ -635,6 +635,39 @@ async def _click_element(page, selector: str) -> bool:
         return False
 
 
+# Button text that means "this click submits/sends" — the dry-run guard for
+# next-step navigation. The AI occasionally labels a submit button as the
+# "next" button; trusting the label alone has caused a real submission.
+_SUBMIT_TEXT_RX = re.compile(r"submit|send\b|finish|reach out|apply\b",
+                             re.IGNORECASE)
+
+
+async def _click_next_guarded(page, selector: str, dry_run: bool):
+    """Click a next-step control. In dry-run, refuse if its visible text is
+    submit-like regardless of what the AI labeled it.
+
+    Returns True, False, or "dry_run_stop".
+    """
+    el = await _try_selector(page, selector, timeout=3000)
+    if not el:
+        return False
+    if dry_run:
+        try:
+            text = ((await el.inner_text()) or "").strip()
+        except Exception:
+            text = ""
+        if _SUBMIT_TEXT_RX.search(text):
+            print(f"\n  [=] DRY RUN -- 'next' button reads '{text[:40]}' "
+                  f"(submit-like). NOT clicking.")
+            return "dry_run_stop"
+    try:
+        await el.click()
+        return True
+    except Exception as e:
+        logger.debug(f"Click failed for {selector}: {e}")
+        return False
+
+
 # ──────────────────────────────────────────────────────────────
 # Resilience Layer: Multi-strategy field filling
 # ──────────────────────────────────────────────────────────────
@@ -1359,7 +1392,9 @@ async def _handle_navigation_step(
 
         success = False
         if next_selector:
-            success = await _click_element(page, next_selector)
+            success = await _click_next_guarded(page, next_selector, dry_run)
+            if success == "dry_run_stop":
+                return "dry_run_stop"
 
         if not success:
             for sel in [
@@ -1369,7 +1404,10 @@ async def _handle_navigation_step(
                 'button:has-text("Save & Continue")',
                 'a:has-text("Next")',
             ]:
-                if await _click_element(page, sel):
+                result = await _click_next_guarded(page, sel, dry_run)
+                if result == "dry_run_stop":
+                    return "dry_run_stop"
+                if result:
                     success = True
                     break
 
@@ -1690,6 +1728,31 @@ async def apply_smart(
     """
     # ─── Phase 0: URL Resolution ────────────────────────────────────────
     from utils.url_resolver import resolve_apply_url, is_ats_url, is_aggregator_url
+    from adapters.indeed import is_indeed_job_url, apply_indeed
+
+    # ─── Indeed postings: native Indeed Apply (smartapply.indeed.com) ────
+    # "Easily apply" jobs have no external ATS link, so URL resolution can
+    # never succeed — Indeed's own hosted wizard is the only apply surface.
+    # Jobs that link out ("Apply on company site") come back as "external"
+    # and continue through the normal resolution/adapter chain below.
+    if is_indeed_job_url(job_url):
+        print("  [*] Indeed posting — trying native Indeed Apply")
+        indeed_result = await apply_indeed(
+            page, job_url, profile, brain,
+            cover_letter=cover_letter, dry_run=dry_run,
+        )
+        indeed_status = indeed_result.get("status")
+        if indeed_status == "success":
+            return True
+        if indeed_status == "external" and indeed_result.get("url"):
+            job_url = indeed_result["url"]
+            print(f"  [+] Indeed links to external application: {job_url[:80]}")
+            # fall through to normal resolution/adapters with the real URL
+        elif indeed_status == "no_apply_button":
+            print("  [*] No Indeed Apply button — falling back to URL resolution")
+            # fall through to the aggregator resolution below
+        else:
+            return False
 
     if not is_ats_url(job_url):
         print(f"  [*] URL resolver: {job_url[:60]}...")
