@@ -21,10 +21,10 @@
     </script>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-    <script defer src="/static/app.js?v=20260827d"></script>
+    <script defer src="/static/app.js?v=20260828e"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 
-    <link rel="stylesheet" href="/static/style.css?v=20260827e" />
+    <link rel="stylesheet" href="/static/style.css?v=20260828a" />
 </head>
 
 <body x-data="pipeline()" x-init="init()" x-cloak>
@@ -378,6 +378,11 @@
                 <!-- PURGE + IGNORE controls -->
                 <template x-if="!discovering && !scoring && !applyState.running && !yoloState.running">
                     <div class="flex items-center gap-1.5 sm:ml-1 sm:pl-2 sm:border-l border-[#1e293b]">
+                        <button x-show="selectedJobs.length > 0" @click="openBulkApply()"
+                                class="cmd-btn text-[0.6rem]"
+                                style="background:rgba(245,158,11,0.12);color:#fbbf24;border-color:rgba(245,158,11,0.3);">
+                            BULK APPLY (<span x-text="selectedJobs.length"></span>)
+                        </button>
                         <button x-show="selectedJobs.length > 0" @click="ignoreSelected()"
                                 class="cmd-btn text-[0.6rem]"
                                 style="background:rgba(100,116,139,0.15);color:#94a3b8;border-color:rgba(100,116,139,0.3);">
@@ -733,6 +738,12 @@
                                     </td>
                                     <td>
                                         <div class="flex items-center gap-1.5">
+                                            <button x-show="job.apply_email && job.status !== 'applied'"
+                                                    @click.stop="openEmailApply(job.id)"
+                                                    :disabled="bulkState.sending"
+                                                    class="text-[0.62rem] font-mono font-bold text-amber-400 hover:text-amber-300 transition-colors disabled:opacity-30"
+                                                    title="Apply by email — a draft opens for review first">EMAIL</button>
+                                            <span x-show="job.apply_email && job.status !== 'applied'" class="text-[#2a3a52]">|</span>
                                             <button x-show="job.apply_url && job.status !== 'applied'"
                                                     @click.stop="applyToJob(job.id)"
                                                     :disabled="applyState.running"
@@ -792,6 +803,7 @@
                                                 <span>Discovered: <span class="text-[#94a3b8]" x-text="formatDate(job.discovered_at)"></span></span>
                                                 <span x-show="job.applied_at">Applied: <span class="text-[#94a3b8]" x-text="formatDate(job.applied_at)"></span></span>
                                                 <span x-show="job.salary_min || job.salary_max">Salary: <span class="text-emerald-400" x-text="formatSalary(job.salary_min, job.salary_max)"></span></span>
+                                                <span x-show="job.apply_email">Hiring inbox: <span class="text-amber-400" x-text="job.apply_email"></span></span>
                                                 <a x-show="job.apply_url" :href="job.apply_url" target="_blank" class="text-cyan-500 hover:text-cyan-300">Apply Link</a>
                                             </div>
 
@@ -1375,6 +1387,155 @@
                     </div>
                 </div>
 
+                <!-- EMAIL APPLY -->
+                <div class="mc-panel">
+                    <div class="mc-panel-header cursor-pointer" @click="toggleSection('emailApply')">
+                        <span class="dot"
+                              :style="bulkState.emailConfigured
+                                  ? 'background:var(--emerald);box-shadow:0 0 6px rgba(16,185,129,0.4)'
+                                  : 'background:var(--rose);box-shadow:0 0 6px rgba(244,63,94,0.4)'"></span>
+                        EMAIL APPLY
+                        <span class="text-[0.55rem] font-mono normal-case tracking-normal"
+                              :class="bulkState.emailConfigured ? 'text-emerald-400' : 'text-rose-400'"
+                              x-text="bulkState.emailConfigured ? 'CONFIGURED' : 'NOT CONFIGURED'"></span>
+                        <span class="ml-auto text-[0.55rem]" x-text="profileSections.emailApply ? '▼' : '▶'"></span>
+                    </div>
+                    <div x-show="profileSections.emailApply" x-transition class="p-4 space-y-3">
+                        <p class="text-[0.62rem] font-mono text-[#64748b] leading-relaxed">
+                            One Gmail account powers inbox checking (status updates) and the
+                            EMAIL / BULK APPLY send channel. Use an
+                            <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener"
+                               class="text-cyan-500 hover:text-cyan-300 underline">App Password</a>
+                            (requires 2-Step Verification), not your account password.
+                        </p>
+
+                        <div>
+                            <label class="pref-label">Gmail Address</label>
+                            <input type="email" class="mc-input" placeholder="you@gmail.com"
+                                   :value="fullProfile.email?.email || ''"
+                                   @blur="updateProfileField('email.email', $event.target.value.trim())" />
+                        </div>
+                        <div>
+                            <label class="pref-label">App Password</label>
+                            <div class="flex gap-2">
+                                <input :type="showAppPassword ? 'text' : 'password'" class="mc-input flex-1"
+                                       placeholder="16 characters, no spaces"
+                                       autocomplete="off"
+                                       :value="fullProfile.email?.app_password || ''"
+                                       @blur="updateProfileField('email.app_password', $event.target.value.replace(/\s+/g, ''))" />
+                                <button @click="showAppPassword = !showAppPassword"
+                                        class="cmd-btn text-[0.6rem] shrink-0"
+                                        x-text="showAppPassword ? 'HIDE' : 'SHOW'"></button>
+                            </div>
+                        </div>
+
+                        <label class="pref-label flex items-center gap-2 cursor-pointer">
+                            <input type="checkbox"
+                                   :checked="fullProfile.email?.enabled === true"
+                                   @change="updateProfileField('email.enabled', $event.target.checked)" />
+                            Check inbox for status updates (every 12h)
+                        </label>
+
+                        <div class="grid grid-cols-3 gap-3">
+                            <div>
+                                <label class="pref-label">IMAP Server</label>
+                                <input type="text" class="mc-input"
+                                       :value="fullProfile.email?.imap_server || 'imap.gmail.com'"
+                                       @blur="updateProfileField('email.imap_server', $event.target.value.trim() || 'imap.gmail.com')" />
+                            </div>
+                            <div>
+                                <label class="pref-label">SMTP Server <span class="normal-case">(optional)</span></label>
+                                <input type="text" class="mc-input" placeholder="auto"
+                                       :value="fullProfile.email?.smtp_server || ''"
+                                       @blur="updateProfileField('email.smtp_server', $event.target.value.trim())" />
+                            </div>
+                            <div>
+                                <label class="pref-label">SMTP Port <span class="normal-case">(optional)</span></label>
+                                <input type="number" class="mc-input" placeholder="465"
+                                       :value="fullProfile.email?.smtp_port || ''"
+                                       @blur="updateProfileField('email.smtp_port', parseInt($event.target.value) || '')" />
+                            </div>
+                        </div>
+
+                        <div class="flex items-center gap-3 pt-1">
+                            <button @click="testEmailConnection()" :disabled="emailTest.running"
+                                    class="cmd-btn text-[0.6rem] disabled:opacity-40"
+                                    style="background:rgba(16,185,129,0.12);color:#34d399;border-color:rgba(16,185,129,0.25);">
+                                <span x-show="!emailTest.running">TEST CONNECTION</span>
+                                <span x-show="emailTest.running" class="animate-pulse">TESTING...</span>
+                            </button>
+                            <span class="text-[0.62rem] font-mono flex-1"
+                                  :class="emailTest.ok === true ? 'text-emerald-400' : emailTest.ok === false ? 'text-rose-400' : 'text-[#64748b]'"
+                                  x-text="emailTest.message"></span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- BROWSER SESSIONS -->
+                <div class="mc-panel">
+                    <div class="mc-panel-header">
+                        <span class="dot"
+                              :style="browserLogin.exists
+                                  ? 'background:var(--emerald);box-shadow:0 0 6px rgba(16,185,129,0.4)'
+                                  : 'background:var(--slate,#64748b)'"></span>
+                        BROWSER SESSIONS
+                        <span class="text-[0.55rem] font-mono normal-case tracking-normal"
+                              :class="browserLogin.exists ? 'text-emerald-400' : 'text-[#64748b]'"
+                              x-text="browserLogin.exists ? `${browserLogin.cookies} COOKIES SAVED` : 'NONE SAVED'"></span>
+                    </div>
+                    <div class="p-4 space-y-2">
+                        <p class="text-[0.62rem] font-mono text-[#64748b] leading-relaxed">
+                            Sites that demand a login before applying (LinkedIn, Indeed, Google
+                            sign-in) only need it ONCE: run this on your Mac, log in to anything
+                            you like in the window that opens, press ENTER — every apply run
+                            (including Docker) reuses those sessions automatically.
+                        </p>
+                        <pre class="text-[0.68rem] font-mono text-cyan-400 bg-[#0a0e17] border border-[#1e293b] rounded-lg p-2.5 overflow-x-auto">python3.11 main.py login</pre>
+                        <div x-show="browserLogin.exists" class="text-[0.62rem] font-mono text-[#94a3b8]">
+                            Saved sessions:
+                            <span class="text-emerald-400" x-text="browserLogin.domains.join(', ') || '—'"></span>
+                            <span class="text-[#475569]" x-text="browserLogin.saved_at ? ` (exported ${formatDate(browserLogin.saved_at)})` : ''"></span>
+                        </div>
+                        <p class="text-[0.58rem] font-mono text-[#475569]">
+                            Re-run it whenever a site logs you out. The window uses your real
+                            Google Chrome — if Google sign-in still balks, log in at
+                            accounts.google.com first, then use the site's Google button.
+                        </p>
+
+                        <!-- Session sync: get local logins onto a hosted (Railway) instance -->
+                        <div class="pt-2 border-t border-[#1e293b] space-y-2">
+                            <p class="text-[0.62rem] font-mono text-[#64748b] leading-relaxed">
+                                <span class="text-[#94a3b8]">Hosted instance?</span> The login
+                                command saves sessions on YOUR computer only. To use them here,
+                                upload the exported file:
+                                <span class="text-cyan-500">.cache/login_state.json</span>
+                                (in the file picker press
+                                <span class="text-[#94a3b8]">Cmd+Shift+G</span> and paste the path —
+                                the folder is hidden).
+                            </p>
+                            <div class="flex items-center gap-2">
+                                <input type="file" accept=".json,application/json" class="hidden"
+                                       x-ref="loginStateFile" @change="uploadLoginState($event)" />
+                                <button @click="$refs.loginStateFile.click()"
+                                        class="cmd-btn text-[0.6rem]"
+                                        style="background:rgba(16,185,129,0.12);color:#34d399;border-color:rgba(16,185,129,0.25);">
+                                    UPLOAD SESSIONS FILE
+                                </button>
+                                <button x-show="browserLogin.exists" @click="clearLoginState()"
+                                        class="cmd-btn text-[0.6rem]"
+                                        style="background:rgba(244,63,94,0.12);color:#fb7185;border-color:rgba(244,63,94,0.3);">
+                                    CLEAR
+                                </button>
+                            </div>
+                            <p class="text-[0.58rem] font-mono text-[#475569]">
+                                Heads-up: Google/LinkedIn may challenge sessions replayed from a
+                                datacenter IP — on hosted deployments, email apply and direct ATS
+                                forms are the reliable channels.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
             </div>
 
             <!-- ============== RIGHT COLUMN ============== -->
@@ -1790,6 +1951,169 @@
         </p>
     </footer>
 
+    <!-- ====================================================================
+         BULK / EMAIL APPLY — draft review modal.
+         Emails are ONLY sent after the user reviews drafts and clicks SEND.
+    ==================================================================== -->
+    <div x-show="bulkState.open" x-cloak
+         class="fixed inset-0 z-[90] bg-black/70 backdrop-blur-sm flex items-start justify-center overflow-y-auto p-4 md:p-8"
+         @keydown.escape.window="bulkState.open && closeBulkModal()">
+        <div class="mc-panel w-full max-w-3xl my-4" @click.stop>
+            <!-- Header -->
+            <div class="flex items-center justify-between p-4 border-b border-[#1e293b]">
+                <div>
+                    <h2 class="text-sm font-bold uppercase tracking-wider text-amber-400" style="font-family: var(--font-mono);">
+                        Email Apply — Review Drafts
+                    </h2>
+                    <p class="text-[0.62rem] font-mono text-[#64748b] mt-1">
+                        Nothing is sent until you press SEND. Edit anything below.
+                    </p>
+                </div>
+                <button @click="closeBulkModal()" class="text-[#64748b] hover:text-rose-400 text-xl leading-none">&times;</button>
+            </div>
+
+            <div class="p-4 space-y-4">
+                <!-- Email config warning -->
+                <div x-show="bulkState.emailConfigured === false"
+                     class="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-[0.7rem] font-mono text-rose-300">
+                    <span class="font-bold">Outbound email is not configured.</span>
+                    <span x-text="bulkState.configReason"></span>
+                    <div class="mt-1 text-[#94a3b8]">
+                        Go to <button @click="bulkState.open = false; switchView('profile'); profileSections.emailApply = true"
+                                      class="text-cyan-400 hover:text-cyan-300 underline">PROFILE → EMAIL APPLY</button>
+                        to set your Gmail address and App Password, then reopen this dialog. Drafts can still be reviewed and copied.
+                    </div>
+                </div>
+                <div x-show="bulkState.emailConfigured" class="text-[0.62rem] font-mono text-[#64748b]">
+                    Sending as <span class="text-emerald-400" x-text="bulkState.emailFrom"></span> — resume attached automatically. Replies go to your profile email.
+                </div>
+
+                <!-- Preparing spinner -->
+                <div x-show="bulkState.preparing" class="text-center py-8">
+                    <p class="text-[0.75rem] font-mono text-amber-400 animate-pulse">
+                        Scanning postings &amp; composing drafts...
+                        <span x-show="bulkState.prepTotal > 1"
+                              x-text="`${bulkState.prepCurrent}/${bulkState.prepTotal}`"></span>
+                    </p>
+                    <p class="text-[0.6rem] font-mono text-[#475569] mt-2">Jobs without a cover letter get an AI-written draft — this can take a minute.</p>
+                    <button @click="cancelBulk()" class="cmd-btn mt-4 text-[0.6rem]"
+                            style="background:rgba(244,63,94,0.12);color:#fb7185;border-color:rgba(244,63,94,0.3);">CANCEL</button>
+                </div>
+
+                <!-- Drafts -->
+                <template x-if="!bulkState.preparing && bulkState.drafts.length">
+                    <div class="space-y-4">
+                        <template x-for="(draft, idx) in bulkState.drafts" :key="draft.job_id">
+                            <div class="p-3 rounded-lg bg-[#0a0e17] border border-amber-500/20">
+                                <div class="flex items-center justify-between mb-2">
+                                    <div class="text-[0.75rem] font-semibold text-[#e2e8f0]">
+                                        <span x-text="draft.title"></span>
+                                        <span class="text-[#64748b]">@</span>
+                                        <span x-text="draft.company"></span>
+                                    </div>
+                                    <button @click="removeDraft(idx)"
+                                            class="text-[0.6rem] font-mono text-rose-500 hover:text-rose-300">REMOVE</button>
+                                </div>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-2 mb-2">
+                                    <div>
+                                        <label class="pref-label">To</label>
+                                        <input x-model="draft.to" class="mc-input text-[0.7rem]" />
+                                    </div>
+                                    <div>
+                                        <label class="pref-label">Subject</label>
+                                        <input x-model="draft.subject" class="mc-input text-[0.7rem]" />
+                                    </div>
+                                </div>
+                                <label class="pref-label">Body</label>
+                                <textarea x-model="draft.body" rows="8"
+                                          class="mc-input text-[0.7rem] leading-relaxed resize-y"></textarea>
+                            </div>
+                        </template>
+                    </div>
+                </template>
+
+                <!-- No emails found -->
+                <div x-show="!bulkState.preparing && bulkState.prepared && !bulkState.drafts.length"
+                     class="text-center py-6 text-[0.7rem] font-mono text-[#64748b]">
+                    No hiring inboxes found in the selected postings.
+                </div>
+
+                <!-- Browser fallback jobs -->
+                <template x-if="!bulkState.preparing && bulkState.browserJobs.length">
+                    <div class="p-3 rounded-lg bg-[#0a0e17] border border-cyan-500/20">
+                        <p class="text-[0.62rem] font-mono uppercase tracking-wider text-cyan-400 mb-2">
+                            No email found — browser pipeline (<span x-text="bulkState.browserJobs.length"></span>)
+                        </p>
+                        <ul class="space-y-1 mb-3 max-h-32 overflow-y-auto">
+                            <template x-for="j in bulkState.browserJobs" :key="j.job_id">
+                                <li class="text-[0.68rem] font-mono text-[#94a3b8]">
+                                    <span x-text="j.title"></span> <span class="text-[#475569]">@</span> <span x-text="j.company"></span>
+                                </li>
+                            </template>
+                        </ul>
+                        <div class="flex gap-2">
+                            <button @click="runBrowserFallback(true)" :disabled="applyState.running" class="cmd-btn text-[0.6rem]"
+                                    style="background:rgba(16,185,129,0.12);color:#34d399;border-color:rgba(16,185,129,0.25);">
+                                BROWSER DRY RUN
+                            </button>
+                            <button @click="runBrowserFallback(false)" :disabled="applyState.running" class="cmd-btn text-[0.6rem]"
+                                    style="background:rgba(244,63,94,0.12);color:#fb7185;border-color:rgba(244,63,94,0.3);">
+                                BROWSER LIVE
+                            </button>
+                        </div>
+                    </div>
+                </template>
+
+                <!-- Skipped -->
+                <div x-show="!bulkState.preparing && bulkState.skipped.length"
+                     class="text-[0.62rem] font-mono text-[#64748b]">
+                    Skipped <span x-text="bulkState.skipped.length"></span> job(s) with no email and no apply URL.
+                </div>
+
+                <!-- Send progress -->
+                <template x-if="bulkState.progress.length">
+                    <div class="p-3 rounded-lg bg-[#0a0e17] border border-[#1e293b]">
+                        <p class="text-[0.62rem] font-mono uppercase tracking-wider text-[#64748b] mb-2">Send Log</p>
+                        <ul class="space-y-1 max-h-40 overflow-y-auto">
+                            <template x-for="(r, i) in bulkState.progress" :key="i">
+                                <li class="text-[0.68rem] font-mono"
+                                    :class="r.status === 'sent' ? 'text-emerald-400' : 'text-rose-400'">
+                                    <span x-text="r.status.toUpperCase()"></span> —
+                                    <span x-text="r.title"></span> @ <span x-text="r.company"></span>
+                                    <span class="text-[#64748b]" x-text="r.to ? `-> ${r.to}` : ''"></span>
+                                    <span x-show="r.error" class="text-[#94a3b8]" x-text="` (${r.error})`"></span>
+                                </li>
+                            </template>
+                        </ul>
+                    </div>
+                </template>
+            </div>
+
+            <!-- Footer actions -->
+            <div class="flex items-center justify-between gap-2 p-4 border-t border-[#1e293b]">
+                <button @click="closeBulkModal()" class="cmd-btn text-[0.6rem]"
+                        style="background:rgba(100,116,139,0.15);color:#94a3b8;border-color:rgba(100,116,139,0.3);">
+                    CLOSE
+                </button>
+                <div class="flex items-center gap-2">
+                    <span x-show="bulkState.sending" class="text-[0.62rem] font-mono text-amber-400 animate-pulse">
+                        SENDING <span x-text="bulkState.progress.length"></span>/<span x-text="bulkState.drafts.length"></span>
+                    </span>
+                    <button x-show="bulkState.sending" @click="cancelBulk()" class="cmd-btn text-[0.6rem]"
+                            style="background:rgba(244,63,94,0.12);color:#fb7185;border-color:rgba(244,63,94,0.3);">
+                        STOP
+                    </button>
+                    <button x-show="!bulkState.sending && bulkState.drafts.length"
+                            @click="sendBulkEmails()"
+                            :disabled="bulkState.preparing || bulkState.emailConfigured === false"
+                            class="cmd-btn text-[0.6rem] disabled:opacity-30"
+                            style="background:rgba(245,158,11,0.15);color:#fbbf24;border-color:rgba(245,158,11,0.35);">
+                        SEND <span x-text="bulkState.drafts.length"></span> EMAIL(S)
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
 
 </body>
 </html>

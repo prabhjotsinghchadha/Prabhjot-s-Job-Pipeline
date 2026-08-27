@@ -95,6 +95,23 @@ function pipeline() {
       total: 0,
     },
 
+    // ----- Bulk / Email Apply -----
+    bulkState: {
+      open: false, // review modal visibility
+      preparing: false, // drafts being generated
+      sending: false, // emails going out
+      prepared: false, // drafts ready for review
+      prepCurrent: 0,
+      prepTotal: 0,
+      drafts: [], // editable [{job_id,title,company,to,subject,body}]
+      browserJobs: [], // fall back to the browser pipeline
+      skipped: [],
+      progress: [], // send results
+      emailConfigured: null, // null = not checked yet
+      emailFrom: "",
+      configReason: "",
+    },
+
     // ----- Follow-ups -----
     followUps: { overdue: [], ghosts: [] },
 
@@ -146,7 +163,15 @@ function pipeline() {
       searchConfig: false,
       commonAnswers: false,
       schedule: false,
+      emailApply: false,
     },
+
+    // ----- Email connection test (profile page) -----
+    emailTest: { running: false, ok: null, message: "" },
+    showAppPassword: false,
+
+    // ----- Saved browser sessions (from `main.py login`) -----
+    browserLogin: { exists: false, cookies: 0, domains: [], saved_at: "" },
 
     // ----- Selection & Purge -----
     selectedJobs: [],
@@ -1079,6 +1104,302 @@ function pipeline() {
     },
 
     // ===================================================================
+    // EMAIL APPLY & BULK APPLY
+    // Flow: prepare drafts -> user reviews/edits -> explicit send click.
+    // Emails are never sent without the user pressing SEND.
+    // ===================================================================
+
+    async checkEmailConfig() {
+      try {
+        const res = await fetch("/api/email-apply/config");
+        const data = await res.json();
+        this.bulkState.emailConfigured = !!data.configured;
+        this.bulkState.emailFrom = data.from || "";
+        this.bulkState.configReason = data.reason || "";
+      } catch (_) {
+        this.bulkState.emailConfigured = null;
+      }
+    },
+
+    async fetchBrowserLoginStatus() {
+      try {
+        const res = await fetch("/api/browser-login/status");
+        const data = await res.json();
+        this.browserLogin = {
+          exists: !!data.exists,
+          cookies: data.cookies || 0,
+          domains: data.domains || [],
+          saved_at: data.saved_at || "",
+        };
+      } catch (_) {}
+    },
+
+    async uploadLoginState(event) {
+      const file = event.target.files?.[0];
+      event.target.value = ""; // allow re-picking the same file later
+      if (!file) return;
+      let state;
+      try {
+        state = JSON.parse(await file.text());
+      } catch (_) {
+        this.notify("That file isn't valid JSON.", "error");
+        return;
+      }
+      try {
+        const res = await fetch("/api/browser-login/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(state),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          this.notify(data.detail || "Upload failed", "error");
+          return;
+        }
+        this.notify(
+          `Sessions uploaded: ${data.cookies} cookie(s) for ${data.domains.length} site(s).`,
+          "success",
+        );
+        this.fetchBrowserLoginStatus();
+      } catch (err) {
+        this.notify(`Upload error: ${err.message}`, "error");
+      }
+    },
+
+    async clearLoginState() {
+      if (!confirm("Delete the saved browser sessions on this server?\n\nApply runs here will hit login walls again until you upload a new export."))
+        return;
+      try {
+        await fetch("/api/browser-login", { method: "DELETE" });
+        this.notify("Saved sessions cleared.", "success");
+        this.fetchBrowserLoginStatus();
+      } catch (err) {
+        this.notify(`Clear error: ${err.message}`, "error");
+      }
+    },
+
+    async testEmailConnection() {
+      // Flush any pending edits first so the test uses what's on screen
+      if (this.profileSaveTimer) {
+        clearTimeout(this.profileSaveTimer);
+        await this.saveFullProfile();
+      }
+      this.emailTest.running = true;
+      this.emailTest.ok = null;
+      this.emailTest.message = "";
+      try {
+        const res = await fetch("/api/email-apply/test", { method: "POST" });
+        const data = await res.json();
+        this.emailTest.ok = !!data.ok;
+        this.emailTest.message = data.ok
+          ? `Connected — sending as ${data.email} via ${data.server}:${data.port}`
+          : data.error || "Connection failed";
+      } catch (err) {
+        this.emailTest.ok = false;
+        this.emailTest.message = err.message;
+      } finally {
+        this.emailTest.running = false;
+        this.checkEmailConfig(); // refresh the configured banner
+      }
+    },
+
+    resetBulkState() {
+      Object.assign(this.bulkState, {
+        preparing: false,
+        sending: false,
+        prepared: false,
+        prepCurrent: 0,
+        prepTotal: 0,
+        drafts: [],
+        browserJobs: [],
+        skipped: [],
+        progress: [],
+      });
+    },
+
+    async openBulkApply() {
+      if (!this.selectedJobs.length) {
+        this.notify("Select jobs first (checkboxes).", "warning");
+        return;
+      }
+      this.resetBulkState();
+      this.bulkState.open = true;
+      this.bulkState.preparing = true;
+      this.bulkState.prepTotal = this.selectedJobs.length;
+      this.checkEmailConfig();
+      try {
+        const res = await fetch("/api/bulk-apply/prepare", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ job_ids: this.selectedJobs }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          this.bulkState.open = false;
+          this.notify(data.detail || "Bulk prepare failed", "error");
+        }
+      } catch (err) {
+        this.bulkState.open = false;
+        this.notify(`Bulk prepare error: ${err.message}`, "error");
+      }
+    },
+
+    async openEmailApply(jobId) {
+      this.resetBulkState();
+      this.bulkState.open = true;
+      this.bulkState.preparing = true;
+      this.bulkState.prepTotal = 1;
+      this.checkEmailConfig();
+      try {
+        const res = await fetch(`/api/email-apply/${jobId}/draft`, {
+          method: "POST",
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          this.bulkState.open = false;
+          this.notify(data.detail || "Draft failed", "error");
+          return;
+        }
+        this.bulkState.drafts = [data];
+        this.bulkState.preparing = false;
+        this.bulkState.prepared = true;
+      } catch (err) {
+        this.bulkState.open = false;
+        this.notify(`Draft error: ${err.message}`, "error");
+      }
+    },
+
+    async refreshBulkStatus() {
+      try {
+        const res = await fetch("/api/bulk-apply/status");
+        const data = await res.json();
+        this.bulkState.drafts = data.drafts || [];
+        this.bulkState.browserJobs = data.browser_jobs || [];
+        this.bulkState.skipped = data.skipped || [];
+      } catch (_) {}
+    },
+
+    removeDraft(idx) {
+      this.bulkState.drafts.splice(idx, 1);
+    },
+
+    async sendBulkEmails() {
+      const items = this.bulkState.drafts.filter(
+        (d) => d.to && d.subject && d.body,
+      );
+      if (!items.length) {
+        this.notify("No complete drafts to send.", "warning");
+        return;
+      }
+      if (
+        !confirm(
+          `SEND ${items.length} APPLICATION EMAIL(S)?\n\n` +
+            `Real emails will be sent from ${this.bulkState.emailFrom || "your configured account"} ` +
+            `with your resume attached. This cannot be undone.`,
+        )
+      )
+        return;
+
+      this.bulkState.sending = true;
+      this.bulkState.progress = [];
+      try {
+        const res = await fetch("/api/bulk-apply/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            items: items.map((d) => ({
+              job_id: d.job_id,
+              to: d.to,
+              subject: d.subject,
+              body: d.body,
+            })),
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          this.bulkState.sending = false;
+          this.notify(data.detail || "Send failed", "error");
+          return;
+        }
+        this.addFeedItem(
+          `EMAIL APPLY started: ${items.length} application(s)`,
+          "#f59e0b",
+        );
+      } catch (err) {
+        this.bulkState.sending = false;
+        this.notify(`Send error: ${err.message}`, "error");
+      }
+    },
+
+    async runBrowserFallback(dryRun) {
+      const ids = this.bulkState.browserJobs.map((j) => j.job_id);
+      if (!ids.length) return;
+      const mode = dryRun ? "DRY RUN" : "LIVE";
+      if (
+        !dryRun &&
+        !confirm(
+          `LIVE browser apply for ${ids.length} job(s)?\n\nReal applications will be submitted.`,
+        )
+      )
+        return;
+      try {
+        const res = await fetch("/api/apply-batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dry_run: dryRun, job_ids: ids }),
+        });
+        const data = await res.json();
+        if (res.ok && data.status === "started") {
+          this.bulkState.open = false;
+          this.applyState.running = true;
+          this.applyState.total = data.count;
+          this.applyState.progress = [];
+          this.notify(
+            `Browser batch ${mode}: ${data.count} job(s)`,
+            "success",
+          );
+          this.addFeedItem(
+            `BROWSER APPLY started: ${data.count} jobs [${mode}]`,
+            "#10b981",
+          );
+        } else {
+          this.notify(data.detail || data.status || "Batch failed", "error");
+        }
+      } catch (err) {
+        this.notify(`Batch error: ${err.message}`, "error");
+      }
+    },
+
+    async cancelBulk() {
+      try {
+        await fetch("/api/bulk-apply/cancel", { method: "POST" });
+        this.notify("Cancel requested...", "warning");
+      } catch (_) {}
+    },
+
+    closeBulkModal() {
+      if (this.bulkState.sending) {
+        if (!confirm("Emails are still sending. Close anyway? (Sending continues in the background)"))
+          return;
+      }
+      this.bulkState.open = false;
+    },
+
+    async scanEmails() {
+      try {
+        const res = await fetch("/api/scan-emails", { method: "POST" });
+        const data = await res.json();
+        this.notify(
+          `Email scan: found ${data.found} hiring inbox(es) across ${data.scanned} jobs.`,
+          data.found ? "success" : "info",
+        );
+        if (data.found) this.fetchJobs();
+      } catch (err) {
+        this.notify(`Scan error: ${err.message}`, "error");
+      }
+    },
+
+    // ===================================================================
     // YOLO MODE
     // ===================================================================
 
@@ -1607,6 +1928,87 @@ function pipeline() {
           this.addFeedItem(`BATCH ERROR: ${event.data.error}`, "#f43f5e");
           break;
 
+        // ----- Email / Bulk Apply Events -----
+        case "bulk_prepare_started":
+          this.bulkState.preparing = true;
+          this.bulkState.prepTotal = event.data.total;
+          this.bulkState.prepCurrent = 0;
+          break;
+
+        case "bulk_prepare_progress":
+          this.bulkState.prepCurrent = event.data.current;
+          break;
+
+        case "bulk_prepare_complete":
+          this.bulkState.preparing = false;
+          this.bulkState.prepared = true;
+          this.refreshBulkStatus();
+          this.addFeedItem(
+            `BULK PREP done: ${event.data.emails} email(s), ${event.data.browser} browser, ${event.data.skipped} skipped`,
+            "#f59e0b",
+          );
+          break;
+
+        case "bulk_prepare_error":
+          this.bulkState.preparing = false;
+          this.notify(`Bulk prepare error: ${event.data.error}`, "error");
+          break;
+
+        case "bulk_send_started":
+          this.bulkState.sending = true;
+          this.bulkState.progress = [];
+          break;
+
+        case "bulk_send_progress":
+          this.bulkState.progress.push(event.data);
+          if (event.data.status === "sent") {
+            this.addFeedItem(
+              `EMAIL SENT: ${event.data.title} @ ${event.data.company} -> ${event.data.to}`,
+              "#10b981",
+            );
+          } else {
+            this.addFeedItem(
+              `EMAIL FAILED: ${event.data.title} @ ${event.data.company} (${event.data.error || event.data.status})`,
+              "#f43f5e",
+            );
+          }
+          break;
+
+        case "bulk_send_complete":
+          this.bulkState.sending = false;
+          this.notify(
+            `Email apply done: ${event.data.sent} sent, ${event.data.failed} failed.`,
+            event.data.failed ? "warning" : "success",
+          );
+          this.selectedJobs = [];
+          this.fetchJobs();
+          this.fetchStats();
+          break;
+
+        case "bulk_send_cancelled":
+          this.bulkState.sending = false;
+          this.notify(`Email apply cancelled (${event.data.sent} sent).`, "warning");
+          this.fetchJobs();
+          break;
+
+        case "bulk_send_error":
+          this.bulkState.sending = false;
+          this.notify(`Email apply error: ${event.data.error}`, "error");
+          break;
+
+        case "email_apply_sent":
+          this.notify(
+            `Application emailed to ${event.data.to} (${event.data.title} @ ${event.data.company}).`,
+            "success",
+          );
+          this.fetchJobs();
+          this.fetchStats();
+          break;
+
+        case "email_scan_complete":
+          if (event.data.found) this.fetchJobs();
+          break;
+
         // ----- YOLO Events -----
         case "yolo_cycle_start":
           this.yoloState.running = true;
@@ -1786,6 +2188,8 @@ function pipeline() {
         this.notify("Failed to load profile", "error");
       }
       this.loadSourceCatalog();
+      this.checkEmailConfig(); // email-apply section banner
+      this.fetchBrowserLoginStatus();
     },
 
     async loadSourceCatalog() {

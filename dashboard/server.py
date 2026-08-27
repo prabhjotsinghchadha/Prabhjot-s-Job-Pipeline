@@ -152,8 +152,14 @@ _PAUSE_GATED_PREFIXES = (
     "/api/scheduler/trigger/",
     "/api/apply/",
     "/api/resolve-url/",
+    "/api/email-apply/",
+    "/api/bulk-apply/",
 )
-_PAUSE_EXEMPT = {"/api/apply/cancel"}
+_PAUSE_EXEMPT = {
+    "/api/apply/cancel",
+    "/api/bulk-apply/cancel",
+    "/api/email-apply/test",  # config check: no tokens, no browser, no send
+}
 
 # Who may flip the switch. The pause protects the deployer's Claude OAuth
 # token, so in multi-tenant mode only the owner account(s) listed here can
@@ -1169,16 +1175,8 @@ async def apply_single_job(job_id: str, body: dict = {}) -> dict:
             })
 
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=not headed_supported(), slow_mo=100)
-                context = await browser.new_context(
-                    viewport={"width": 1920, "height": 1080},
-                    user_agent=(
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Safari/537.36"
-                    ),
-                )
-                page = await context.new_page()
+                from utils.browser import launch_apply_browser
+                page, close_browser = await launch_apply_browser(p)
 
                 platform = job.get("platform", "")
                 apply_url = job["apply_url"]
@@ -1208,7 +1206,7 @@ async def apply_single_job(job_id: str, body: dict = {}) -> dict:
 
                 # Keep browser open for a bit so user can review
                 await asyncio.sleep(5)
-                await browser.close()
+                await close_browser()
 
         except Exception as exc:
             await broadcast_event({
@@ -1226,12 +1224,15 @@ async def apply_single_job(job_id: str, body: dict = {}) -> dict:
 @app.post("/api/apply-batch")
 async def apply_batch(body: dict = {}) -> dict:
     """
-    Apply to all matched jobs above the score threshold.
+    Apply to all matched jobs above the score threshold — or, when `job_ids`
+    is given, to exactly that user-selected set (bulk apply).
 
     Body options:
         dry_run   — bool, default True
         max_count — int, max applications this batch (default 10)
         min_score — int, override minimum score (default from profile)
+        job_ids   — list[str], apply to these specific jobs (skips the
+                    score filter; the user picked them explicitly)
     """
     if _apply_state()["running"]:
         raise HTTPException(status_code=409, detail="An apply session is already running")
@@ -1239,10 +1240,7 @@ async def apply_batch(body: dict = {}) -> dict:
     dry_run = body.get("dry_run", True)
     max_count = body.get("max_count", 10)
     min_score_override = body.get("min_score")
-
-    # Get matched jobs that haven't been applied to yet
-    from utils.tracker import get_all_jobs as get_jobs_filtered, get_today_count
-    matched_jobs, _ = get_jobs_filtered(status="matched", sort_by="match_score", sort_order="desc", limit=500)
+    job_ids = body.get("job_ids")
 
     import yaml
     profile_path = usercontext.profile_path()
@@ -1253,12 +1251,24 @@ async def apply_batch(body: dict = {}) -> dict:
     rate_limits = profile.get("rate_limits", {})
     max_per_day = rate_limits.get("max_applications_per_day", 25)
 
-    # Filter to only jobs with apply URLs and above score threshold
-    eligible = [
-        j for j in matched_jobs
-        if j.get("apply_url")
-        and (j.get("match_score") or 0) >= min_score
-    ][:max_count]
+    from utils.tracker import get_all_jobs as get_jobs_filtered, get_today_count
+
+    if job_ids:
+        # Explicit selection: the user chose these — no score gate
+        selected = [get_job_by_id(jid) for jid in job_ids]
+        eligible = [
+            j for j in selected
+            if j and j.get("apply_url") and j.get("status") not in ("applied", "ignored")
+        ][:max(max_count, len(job_ids))]
+    else:
+        # Get matched jobs that haven't been applied to yet
+        matched_jobs, _ = get_jobs_filtered(status="matched", sort_by="match_score", sort_order="desc", limit=500)
+        # Filter to only jobs with apply URLs and above score threshold
+        eligible = [
+            j for j in matched_jobs
+            if j.get("apply_url")
+            and (j.get("match_score") or 0) >= min_score
+        ][:max_count]
 
     if not eligible:
         return {"status": "no_eligible_jobs", "count": 0}
@@ -1292,16 +1302,8 @@ async def apply_batch(body: dict = {}) -> dict:
             })
 
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=not headed_supported(), slow_mo=100)
-                context = await browser.new_context(
-                    viewport={"width": 1920, "height": 1080},
-                    user_agent=(
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Safari/537.36"
-                    ),
-                )
-                page = await context.new_page()
+                from utils.browser import launch_apply_browser
+                page, close_browser = await launch_apply_browser(p)
 
                 applied_count = 0
                 for i, job in enumerate(eligible):
@@ -1368,7 +1370,7 @@ async def apply_batch(body: dict = {}) -> dict:
                         })
                         await asyncio.sleep(delay)
 
-                await browser.close()
+                await close_browser()
 
             await broadcast_event({
                 "type": "apply_batch_complete",
@@ -1470,6 +1472,452 @@ async def resolve_url(job_id: str) -> dict:
         }
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+
+# ===========================================================================
+# REST API — Email Apply & Bulk Apply
+#
+# Flow: prepare (extract emails + compose drafts) → user reviews/edits every
+# draft in the dashboard → send (explicit confirmation). Emails are NEVER
+# sent without the user pressing send. Jobs without a hiring inbox fall back
+# to the browser pipeline via /api/apply-batch {job_ids}.
+# ===========================================================================
+
+# Per-user bulk-apply state (keyed by uid; one entry total in legacy mode).
+_bulk_states: dict = {}
+
+
+def _bulk_state() -> dict:
+    uid = usercontext.current_uid()
+    return _bulk_states.setdefault(uid, {
+        "running": False,
+        "phase": None,          # "prepare" | "send" | None
+        "drafts": [],           # [{job_id, title, company, to, subject, body}]
+        "browser_jobs": [],     # jobs with an apply_url but no email
+        "skipped": [],          # jobs with neither
+        "progress": [],         # send results
+        "cancel_requested": False,
+    })
+
+
+def _load_profile() -> dict:
+    import yaml
+    with open(usercontext.profile_path()) as f:
+        return yaml.safe_load(f)
+
+
+@app.post("/api/scan-emails")
+async def scan_apply_emails() -> dict:
+    """Regex-backfill apply_email for all stored jobs. No tokens, no network."""
+    from utils.email_apply import backfill_apply_emails
+    result = await asyncio.to_thread(backfill_apply_emails)
+    await broadcast_event({"type": "email_scan_complete", "data": result})
+    return result
+
+
+@app.get("/api/email-apply/config")
+async def email_apply_config() -> dict:
+    """Whether outbound email is configured (never exposes the password)."""
+    from utils.email_apply import smtp_config
+    try:
+        cfg = smtp_config(_load_profile())
+        return {"configured": True, "from": cfg["email"],
+                "server": cfg["server"], "port": cfg["port"]}
+    except Exception as e:
+        return {"configured": False, "reason": str(e)}
+
+
+@app.get("/api/browser-login/status")
+async def browser_login_status() -> dict:
+    """
+    Saved browser sessions from `main.py login` — domain names and age only,
+    never the tokens themselves.
+    """
+    from utils.browser import login_state_path
+    path = login_state_path()
+    if not path.exists():
+        return {"exists": False}
+    try:
+        state = json.loads(path.read_text())
+        cookies = state.get("cookies", [])
+        domains = sorted({c.get("domain", "").lstrip(".")
+                          for c in cookies if c.get("domain")})
+        return {
+            "exists": True,
+            "saved_at": datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
+            "cookies": len(cookies),
+            "domains": domains[:20],
+        }
+    except FileNotFoundError:
+        return {"exists": False}  # deleted between check and read
+    except Exception as e:
+        return {"exists": True, "error": str(e)}
+
+
+@app.post("/api/browser-login/upload")
+async def browser_login_upload(body: dict) -> dict:
+    """
+    Session sync for hosted deployments: accept a Playwright storage_state
+    export (the `.cache/login_state.json` written by `main.py login` on the
+    user's machine) and store it in this instance's per-user cache, so
+    browser applies here start logged in. Auth middleware already scopes
+    this to the calling user.
+    """
+    from utils.browser import login_state_path
+
+    cookies = body.get("cookies")
+    if not isinstance(cookies, list) or not cookies:
+        raise HTTPException(
+            status_code=400,
+            detail="Not a login-state export — expected the JSON written by "
+                   "`python3.11 main.py login` (.cache/login_state.json)",
+        )
+    if len(cookies) > 5000:
+        raise HTTPException(status_code=400, detail="Too many cookies (max 5000)")
+    for c in cookies:
+        if not (isinstance(c, dict) and c.get("name") and "value" in c):
+            raise HTTPException(status_code=400, detail="Malformed cookie entry")
+
+    state = {"cookies": cookies, "origins": body.get("origins", [])}
+    path = login_state_path()
+    path.write_text(json.dumps(state))
+    os.chmod(path, 0o600)
+
+    domains = sorted({c.get("domain", "").lstrip(".")
+                      for c in cookies if c.get("domain")})
+    await broadcast_event({
+        "type": "browser_login_updated",
+        "data": {"cookies": len(cookies), "domains": domains[:20]},
+    })
+    return {"status": "saved", "cookies": len(cookies), "domains": domains[:20]}
+
+
+@app.delete("/api/browser-login")
+async def browser_login_clear() -> dict:
+    """Delete the stored login sessions for this user."""
+    from utils.browser import login_state_path
+    path = login_state_path()
+    existed = path.exists()
+    if existed:
+        path.unlink()
+    await broadcast_event({"type": "browser_login_updated",
+                           "data": {"cookies": 0, "domains": []}})
+    return {"status": "cleared" if existed else "nothing_to_clear"}
+
+
+@app.post("/api/email-apply/test")
+async def email_apply_test() -> dict:
+    """Log in to the SMTP server to verify credentials. Sends nothing."""
+    from utils.email_apply import test_smtp_login
+    try:
+        result = await asyncio.to_thread(test_smtp_login, _load_profile())
+        return {"ok": True, **result}
+    except ValueError as e:  # not configured
+        return {"ok": False, "error": str(e)}
+    except Exception as e:
+        return {"ok": False,
+                "error": f"SMTP login failed: {e}. For Gmail, make sure you're "
+                         f"using an App Password (not your account password)."}
+
+
+@app.post("/api/email-apply/{job_id}/draft")
+async def email_apply_draft(job_id: str) -> dict:
+    """
+    Build (but do not send) an application email draft for one job.
+    Uses the stored cover letter when present; AI compose otherwise.
+    """
+    from utils.email_apply import extract_apply_email, compose_application_email
+    from utils.tracker import update_apply_email
+
+    job = get_job_by_id(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    apply_email = job.get("apply_email") or ""
+    if not apply_email:
+        apply_email = extract_apply_email(job.get("description") or "") or ""
+        if apply_email:
+            update_apply_email(job_id, apply_email)
+            job["apply_email"] = apply_email
+    if not apply_email:
+        raise HTTPException(
+            status_code=400,
+            detail="No application email found in this posting. "
+                   "Use the browser APPLY instead.",
+        )
+
+    profile = _load_profile()
+    brain = None
+    if not (job.get("cover_letter") or "").strip():
+        from utils.brain import ClaudeBrain
+        brain = ClaudeBrain(verbose=False, profile=profile)
+
+    draft = await asyncio.to_thread(compose_application_email, job, profile, brain)
+    return {
+        "job_id": job_id,
+        "title": job.get("title"),
+        "company": job.get("company"),
+        **draft,
+        "resume": profile.get("resume_path", ""),
+    }
+
+
+@app.post("/api/email-apply/{job_id}/send")
+async def email_apply_send(job_id: str, body: dict) -> dict:
+    """
+    Send ONE user-reviewed application email. The dashboard only calls this
+    after the user has seen the draft and pressed send.
+
+    Body: {to, subject, body}
+    """
+    from utils.email_apply import send_application_email, smtp_config
+    from utils.tracker import log_applied, update_job_notes
+
+    job = get_job_by_id(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    to = (body.get("to") or "").strip()
+    subject = (body.get("subject") or "").strip()
+    text = (body.get("body") or "").strip()
+    if not to or not subject or not text:
+        raise HTTPException(status_code=400, detail="to, subject, and body are required")
+
+    profile = _load_profile()
+    try:
+        smtp_config(profile)  # fail fast with the config message
+        resume = profile.get("resume_path", "")
+        await asyncio.to_thread(
+            send_application_email, profile, to, subject, text,
+            resume if resume and Path(resume).exists() else "",
+        )
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        log_applied(job_id, False)
+        raise HTTPException(status_code=502, detail=f"Send failed: {e}")
+
+    log_applied(job_id, True)
+    note = f"Applied via email to {to} on {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    existing = (job.get("notes") or "").strip()
+    update_job_notes(job_id, f"{existing}\n{note}".strip())
+
+    await broadcast_event({
+        "type": "email_apply_sent",
+        "data": {"job_id": job_id, "to": to,
+                 "title": job.get("title"), "company": job.get("company")},
+    })
+    return {"status": "sent", "job_id": job_id, "to": to}
+
+
+@app.post("/api/bulk-apply/prepare")
+async def bulk_apply_prepare(body: dict) -> dict:
+    """
+    Stage 1 of bulk apply: for each selected job, find its hiring inbox and
+    compose an email draft; jobs without one are queued for the browser
+    pipeline. Runs in the background; results land in /api/bulk-apply/status
+    and are broadcast over the WebSocket. Nothing is sent from here.
+
+    Body: {job_ids: [...]}
+    """
+    job_ids = body.get("job_ids") or []
+    if not job_ids:
+        raise HTTPException(status_code=400, detail="job_ids is required")
+    if _bulk_state()["running"] or _apply_state()["running"]:
+        raise HTTPException(status_code=409, detail="An apply session is already running")
+
+    profile = _load_profile()
+
+    async def _do_prepare():
+        from utils.email_apply import extract_apply_email, compose_application_email
+        from utils.tracker import update_apply_email
+        from utils.brain import ClaudeBrain
+
+        state = _bulk_state()
+        state.update(running=True, phase="prepare", drafts=[], browser_jobs=[],
+                     skipped=[], progress=[], cancel_requested=False)
+        brain = None  # created lazily — only needed for jobs without a cover letter
+
+        try:
+            await broadcast_event({
+                "type": "bulk_prepare_started",
+                "data": {"total": len(job_ids)},
+            })
+
+            for i, jid in enumerate(job_ids):
+                if state["cancel_requested"] or is_paused():
+                    break
+                job = get_job_by_id(jid)
+                if not job:
+                    state["skipped"].append({"job_id": jid, "reason": "not found"})
+                    continue
+
+                entry = {"job_id": jid, "title": job.get("title"),
+                         "company": job.get("company")}
+
+                apply_email = job.get("apply_email") or ""
+                if not apply_email:
+                    apply_email = extract_apply_email(job.get("description") or "") or ""
+                    if apply_email:
+                        update_apply_email(jid, apply_email)
+                        job["apply_email"] = apply_email
+
+                if apply_email:
+                    if brain is None and not (job.get("cover_letter") or "").strip():
+                        brain = ClaudeBrain(verbose=False, profile=profile)
+                    draft = await asyncio.to_thread(
+                        compose_application_email, job, profile,
+                        brain if not (job.get("cover_letter") or "").strip() else None,
+                    )
+                    state["drafts"].append({**entry, **draft})
+                elif job.get("apply_url"):
+                    state["browser_jobs"].append({**entry, "apply_url": job["apply_url"]})
+                else:
+                    state["skipped"].append({**entry, "reason": "no email and no apply URL"})
+
+                await broadcast_event({
+                    "type": "bulk_prepare_progress",
+                    "data": {"current": i + 1, "total": len(job_ids),
+                             "emails": len(state["drafts"]),
+                             "browser": len(state["browser_jobs"])},
+                })
+
+            await broadcast_event({
+                "type": "bulk_prepare_complete",
+                "data": {"emails": len(state["drafts"]),
+                         "browser": len(state["browser_jobs"]),
+                         "skipped": len(state["skipped"])},
+            })
+        except Exception as exc:
+            await broadcast_event({"type": "bulk_prepare_error", "data": {"error": str(exc)}})
+        finally:
+            state["running"] = False
+            state["phase"] = None
+
+    asyncio.create_task(_do_prepare())
+    return {"status": "started", "count": len(job_ids)}
+
+
+@app.get("/api/bulk-apply/status")
+async def bulk_apply_status() -> dict:
+    """Current bulk-apply state: drafts to review, browser fallbacks, progress."""
+    state = _bulk_state()
+    return {k: state[k] for k in
+            ("running", "phase", "drafts", "browser_jobs", "skipped", "progress")}
+
+
+@app.post("/api/bulk-apply/send")
+async def bulk_apply_send(body: dict) -> dict:
+    """
+    Stage 2 of bulk apply: send the user-reviewed email drafts. The dashboard
+    only calls this after the user has reviewed every draft and pressed the
+    send button — that click is the explicit confirmation for this batch.
+
+    Body: {items: [{job_id, to, subject, body}, ...]}
+    """
+    from utils.email_apply import smtp_config
+    from utils.tracker import get_today_count
+
+    items = body.get("items") or []
+    if not items:
+        raise HTTPException(status_code=400, detail="items is required")
+    if _bulk_state()["running"] or _apply_state()["running"]:
+        raise HTTPException(status_code=409, detail="An apply session is already running")
+
+    profile = _load_profile()
+    try:
+        smtp_config(profile)  # surface config problems before starting
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    max_per_day = profile.get("rate_limits", {}).get("max_applications_per_day", 25)
+
+    async def _do_send():
+        import random
+        from utils.email_apply import send_application_email
+        from utils.tracker import log_applied, update_job_notes
+
+        state = _bulk_state()
+        state.update(running=True, phase="send", progress=[], cancel_requested=False)
+
+        try:
+            await broadcast_event({
+                "type": "bulk_send_started", "data": {"total": len(items)},
+            })
+            resume = profile.get("resume_path", "")
+            resume = resume if resume and Path(resume).exists() else ""
+
+            for i, item in enumerate(items):
+                if state["cancel_requested"] or is_paused():
+                    await broadcast_event({
+                        "type": "bulk_send_cancelled",
+                        "data": {"sent": len([r for r in state["progress"] if r["status"] == "sent"])},
+                    })
+                    break
+                if get_today_count() >= max_per_day:
+                    state["progress"].append({
+                        "job_id": item.get("job_id"), "status": "skipped",
+                        "error": f"daily limit reached ({max_per_day})",
+                    })
+                    break
+
+                jid = item.get("job_id")
+                job = get_job_by_id(jid) or {}
+                result = {"job_id": jid, "title": job.get("title"),
+                          "company": job.get("company"), "to": item.get("to")}
+                try:
+                    await asyncio.to_thread(
+                        send_application_email, profile,
+                        (item.get("to") or "").strip(),
+                        (item.get("subject") or "").strip(),
+                        (item.get("body") or "").strip(),
+                        resume,
+                    )
+                    log_applied(jid, True)
+                    note = (f"Applied via email to {item.get('to')} on "
+                            f"{datetime.now().strftime('%Y-%m-%d %H:%M')}")
+                    existing = (job.get("notes") or "").strip()
+                    update_job_notes(jid, f"{existing}\n{note}".strip())
+                    result["status"] = "sent"
+                except Exception as exc:
+                    log_applied(jid, False)
+                    result["status"] = "failed"
+                    result["error"] = str(exc)
+
+                state["progress"].append(result)
+                await broadcast_event({
+                    "type": "bulk_send_progress",
+                    "data": {"current": i + 1, "total": len(items), **result},
+                })
+
+                # Small human-ish gap between sends (also avoids SMTP rate flags)
+                if i < len(items) - 1:
+                    await asyncio.sleep(random.randint(4, 12))
+
+            sent = len([r for r in state["progress"] if r["status"] == "sent"])
+            failed = len([r for r in state["progress"] if r["status"] == "failed"])
+            await broadcast_event({
+                "type": "bulk_send_complete",
+                "data": {"sent": sent, "failed": failed, "total": len(items),
+                         "results": state["progress"]},
+            })
+        except Exception as exc:
+            await broadcast_event({"type": "bulk_send_error", "data": {"error": str(exc)}})
+        finally:
+            state["running"] = False
+            state["phase"] = None
+
+    asyncio.create_task(_do_send())
+    return {"status": "started", "count": len(items)}
+
+
+@app.post("/api/bulk-apply/cancel")
+async def bulk_apply_cancel() -> dict:
+    """Stop the current bulk prepare/send after the item in flight."""
+    if not _bulk_state()["running"]:
+        return {"status": "not_running"}
+    _bulk_state()["cancel_requested"] = True
+    return {"status": "cancel_requested"}
 
 
 # ===========================================================================
@@ -1659,16 +2107,8 @@ async def start_yolo(body: dict = {}) -> dict:
                         _apply_state()["running"] = True
 
                         async with async_playwright() as p:
-                            browser = await p.chromium.launch(headless=not headed_supported(), slow_mo=100)
-                            context = await browser.new_context(
-                                viewport={"width": 1920, "height": 1080},
-                                user_agent=(
-                                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                    "Chrome/120.0.0.0 Safari/537.36"
-                                ),
-                            )
-                            page = await context.new_page()
+                            from utils.browser import launch_apply_browser
+                            page, close_browser = await launch_apply_browser(p)
                             applied_count = 0
 
                             for i, job in enumerate(eligible):
@@ -1720,7 +2160,7 @@ async def start_yolo(body: dict = {}) -> dict:
                                     ylog(f"    Waiting {delay}s...")
                                     await asyncio.sleep(delay)
 
-                            await browser.close()
+                            await close_browser()
 
                         _apply_state()["running"] = False
                         _apply_state()["job_id"] = None

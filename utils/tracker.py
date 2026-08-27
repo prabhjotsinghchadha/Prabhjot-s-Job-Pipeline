@@ -83,6 +83,7 @@ def _migrate_schema(conn: sqlite3.Connection):
         "follow_up_date": "TEXT",
         "last_activity": "TEXT",
         "follow_up_count": "INTEGER DEFAULT 0",
+        "apply_email": "TEXT DEFAULT ''",
     }
 
     for col, col_type in migrations.items():
@@ -116,14 +117,22 @@ def log_discovered(job) -> None:
     if is_ignored(job.title, job.company):
         return
 
+    # Cheap regex scan for a hiring inbox — enables email-based applying
+    apply_email = ""
+    try:
+        from utils.email_apply import extract_apply_email
+        apply_email = extract_apply_email(getattr(job, 'description', '') or '') or ""
+    except Exception:
+        pass
+
     conn = get_db()
     try:
         metadata = json.dumps(job.metadata) if isinstance(job.metadata, dict) else job.metadata
         conn.execute("""
             INSERT OR IGNORE INTO applications
             (id, title, company, platform, url, apply_url, location, description, source,
-             salary_min, salary_max, date_posted, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             salary_min, salary_max, date_posted, metadata, apply_email)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             job.id, job.title, job.company, job.platform, job.url, job.apply_url,
             job.location, getattr(job, 'description', ''),
@@ -131,7 +140,7 @@ def log_discovered(job) -> None:
             job.metadata.get('salary_min') if isinstance(job.metadata, dict) else None,
             job.metadata.get('salary_max') if isinstance(job.metadata, dict) else None,
             job.metadata.get('date_posted', '') if isinstance(job.metadata, dict) else '',
-            metadata
+            metadata, apply_email
         ))
         conn.commit()
     finally:
@@ -375,6 +384,15 @@ def update_job_notes(job_id: str, notes: str) -> bool:
     """Update notes for a job."""
     conn = get_db()
     conn.execute("UPDATE applications SET notes = ? WHERE id = ?", (notes, job_id))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def update_apply_email(job_id: str, apply_email: str) -> bool:
+    """Store the extracted application email for a job."""
+    conn = get_db()
+    conn.execute("UPDATE applications SET apply_email = ? WHERE id = ?", (apply_email, job_id))
     conn.commit()
     conn.close()
     return True

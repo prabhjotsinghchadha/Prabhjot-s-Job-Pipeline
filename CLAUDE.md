@@ -119,6 +119,14 @@ POST   /api/score-all             — Score all unscored jobs
 POST   /api/rescore/{id}          — Re-score one job
 POST   /api/ingest                — Ingest MCP-discovered jobs: {"jobs": [...]}
 POST   /api/check-email           — Check email for status updates
+POST   /api/scan-emails           — Regex-backfill apply_email (hiring inbox) for stored jobs
+GET    /api/email-apply/config    — Is outbound SMTP configured? (profile email + app_password)
+POST   /api/email-apply/{id}/draft— Compose application email draft (cover letter based; AI fallback)
+POST   /api/email-apply/{id}/send — Send ONE reviewed draft {to, subject, body} + resume attached
+POST   /api/bulk-apply/prepare    — {job_ids} → drafts for email-able jobs, rest queued for browser
+GET    /api/bulk-apply/status     — Drafts to review, browser fallbacks, send progress
+POST   /api/bulk-apply/send       — {items:[{job_id,to,subject,body}]} — sends AFTER user review
+POST   /api/bulk-apply/cancel     — Stop current bulk prepare/send
 GET    /api/jobs                   — List jobs (filter: status, company, min_score, search)
 GET    /api/jobs/{id}              — Single job detail
 PATCH  /api/jobs/{id}              — Update status or notes
@@ -137,6 +145,39 @@ GET    /api/system/state           — Global pause state (+ whether caller may 
 POST   /api/system/pause           — KILL SWITCH: stop ALL automation + Claude usage (owner only, all users)
 POST   /api/system/resume          — Resume automation (owner only)
 ```
+
+### Email Apply & Bulk Apply
+
+Many postings (HN, startup pages) say "email your resume to jobs@..." —
+`utils/email_apply.py` handles that channel. Discovery regex-scans every
+description for a hiring inbox (stored in the `apply_email` column; excludes
+noreply/support/accommodations inboxes and ATS/aggregator domains). Dashboard
+flow: select jobs → BULK APPLY → drafts composed (stored cover letter when
+present, AI otherwise) → user reviews/edits EVERY draft → explicit SEND click
+→ SMTP send with resume attached. Sending uses the profile `email` section
+(same Gmail app password as IMAP; smtp_server/smtp_port optional, derived
+from imap_server). Jobs without an email fall back to the browser pipeline
+(`/api/apply-batch` now accepts `job_ids`). Browser apply sessions use a
+PERSISTENT Chromium profile (`.cache/browser_profile_<os>`, bind-mounted in
+Docker) via `utils/browser.py:launch_apply_browser()` so logins survive
+between runs. INVARIANT: drafts are never sent without the user's explicit
+send click in the dashboard.
+
+Login walls: `python3.11 main.py login [url]` (run on the HOST — needs a
+display) opens the persistent browser headed so the user logs in to job
+sites once; on ENTER it exports `.cache/login_state.json` (Playwright
+storage_state, chmod 600). Every apply launch imports it — this is how
+sessions cross the macOS↔Linux boundary, since Chromium cookie encryption
+is OS-specific and raw profiles do NOT transfer. Endpoints:
+`GET /api/browser-login/status` (domains + age only),
+`POST /api/browser-login/upload` (session sync — push a login_state.json
+export to a hosted instance, e.g. Railway, via the dashboard's UPLOAD
+SESSIONS FILE button), `DELETE /api/browser-login` (clear). Dashboard:
+PROFILE → BROWSER SESSIONS. Sessions replayed from datacenter IPs may be
+challenged by Google/LinkedIn — on hosted deploys prefer email apply and
+direct ATS forms. Claude must NEVER perform the logins itself (credentials
+are the user's); prefer resolve-url → direct ATS forms and email apply over
+login-walled aggregators.
 
 ### Global Pause Switch (Claude token saver)
 
