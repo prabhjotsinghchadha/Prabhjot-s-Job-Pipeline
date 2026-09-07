@@ -79,6 +79,40 @@ favorite_companies:
 - figma
 - vercel
 custom_career_pages: []
+
+# Resume Builder — structured resume content rendered to ATS-friendly PDF/DOCX
+# (dashboard PROFILE → RESUME BUILDER; GET /api/resume/build?format=pdf|docx).
+# Per-job TAILOR rewrites summary/bullets/skills from THIS data and the apply
+# adapters upload the tailored PDF when use_tailored_when_applying is true.
+resume:
+  headline: Senior Software Engineer
+  summary: Two or three sentences on your level, stack, and biggest measurable wins.
+  skills:
+  - category: Languages & Frameworks
+    items: [Python, TypeScript, React]
+  - category: Cloud & Infrastructure
+    items: [AWS, Docker, Kubernetes]
+  experience:
+  - company: Example Corp
+    title: Senior Software Engineer
+    location: Remote
+    start: Jan 2022
+    end: Present
+    tagline: one-line description of the company (optional)
+    bullets:
+    - Led X, improving Y by Z%.
+  education:
+  - degree: B.S. Computer Science
+    school: State University
+    location: City, Country
+    start: '2014'
+    end: '2018'
+    details: ''
+  projects: []        # {name, url, description, tech: [], bullets: []}
+  certifications: []  # {name, issuer, year}
+  awards: []
+  languages: []
+  use_tailored_when_applying: true
 # Per-source discovery toggles — set any to false to skip that site.
 # A missing key means enabled. Full catalog: utils/discovery.py SOURCE_REGISTRY.
 sources:

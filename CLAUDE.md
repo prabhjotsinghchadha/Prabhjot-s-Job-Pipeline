@@ -127,6 +127,11 @@ POST   /api/bulk-apply/prepare    — {job_ids} → drafts for email-able jobs, 
 GET    /api/bulk-apply/status     — Drafts to review, browser fallbacks, send progress
 POST   /api/bulk-apply/send       — {items:[{job_id,to,subject,body}]} — sends AFTER user review
 POST   /api/bulk-apply/cancel     — Stop current bulk prepare/send
+GET    /api/resume/build          — Resume Builder → ?format=pdf|docx|txt[&job_id=] (tailored overlay, download)
+GET    /api/resume/ats            — ATS report (?job_id= scores vs that posting; &source=uploaded checks the PDF on disk)
+POST   /api/resume/import         — AI-transcribe the uploaded PDF into profile.resume (pause-gated)
+POST   /api/resume/save-as        — Render PDF into RESUME MANAGEMENT {name, job_id?, set_default}
+POST   /api/resume/customize      — One-click tailor for a pasted posting {title, company, url?, description?, extra_skills?, notes?} → creates manual job + runs tailor (pause-gated)
 GET    /api/jobs                   — List jobs (filter: status, company, min_score, search)
 GET    /api/jobs/{id}              — Single job detail
 PATCH  /api/jobs/{id}              — Update status or notes
@@ -178,6 +183,30 @@ challenged by Google/LinkedIn — on hosted deploys prefer email apply and
 direct ATS forms. Claude must NEVER perform the logins itself (credentials
 are the user's); prefer resolve-url → direct ATS forms and email apply over
 login-walled aggregators.
+
+### Resume Builder & ATS Checker
+
+`profile.yaml → resume:` holds the resume as DATA (headline, summary, grouped
+skills, experience with bullets, education, projects, certifications, awards,
+languages). `utils/resume_builder.py` renders it to ATS-friendly PDF
+(reportlab), DOCX (python-docx) and plain text — single column, standard
+headings, no tables/images/headers, real text layer — so every format says
+the same thing. TAILOR (`POST /api/jobs/{id}/tailor`) runs in *structured*
+mode when that section exists: Claude returns per-role bullet rewrites,
+regrouped skills, headline and summary, validated in `utils/resume_tailor.py`
+(indexes in range, bullet count capped at original+1, companies/dates never
+touched) and overlaid at render time via `apply_tailoring()`. The apply paths
+(`/api/apply/{id}`, apply-batch, email-apply send, bulk send) call
+`resume_path_for_job()` which renders `resumes/tailored/<job_id>.pdf` and
+points `resume_path` at it — unless `resume.use_tailored_when_applying`
+is false or no tailoring exists (then the uploaded default PDF is used).
+`utils/ats_checker.py` is deterministic (no tokens): keyword coverage vs the
+posting (alias-aware, requirement-block weighted) 60% + parseability/format
+checks 40%. Dashboard: PROFILE → RESUME BUILDER (edit, IMPORT FROM PDF (AI),
+ATS CHECK, ⬇ PDF / ⬇ DOCX, SAVE AS DEFAULT); job row → Tailored Resume
+panel shows the ATS chip and ⬇ PDF / ⬇ DOCX for the tailored version.
+INVARIANT: tailoring rephrases and re-prioritises real experience — it never
+invents employers, titles, dates, metrics or skills.
 
 ### Global Pause Switch (Claude token saver)
 
@@ -253,6 +282,7 @@ skills: # Primary and secondary skill lists for scoring
 ideal_job_description: # Free-text ideal job for semantic matching
 favorite_companies: # +10 scoring boost
 custom_career_pages: # URLs to scrape with Playwright
+resume: # Resume Builder data: headline, summary, skills[{category,items}], experience[{company,title,location,start,end,tagline,bullets}], education, projects, certifications, awards, languages, use_tailored_when_applying
 sources: # Per-source on/off toggles (greenhouse, lever, jobspy, remoteok, yc_jobs, remotive, himalayas, arbeitnow, weworkremotely, web3career, adzuna, hn, career_pages) — missing key = enabled; catalog in utils/discovery.py SOURCE_REGISTRY
 rate_limits: # max_per_day, min/max delay between applications
 schedule: # Discovery/scoring intervals, enabled flag
@@ -303,6 +333,9 @@ utils/
   career_page_source.py        — Playwright + AI extraction from any career URL
   mcp_source.py                — MCP tool helpers: query generation, WebSearch parsing, ingestion
   resume_parser.py             — PDF text extraction with caching
+  resume_builder.py            — profile.resume → ATS-friendly PDF/DOCX/text; tailoring overlay; tailored PDF per job
+  resume_tailor.py             — Claude tailoring (structured per-role rewrites + legacy mode) and PDF→structure import
+  ats_checker.py               — Deterministic ATS score: keyword coverage vs posting + format/parseability checks
   email_checker.py             — IMAP email monitoring + classification
   events.py                    — EventBus singleton (sync emit → async broadcast)
   answers.py                   — Form answer pattern matching

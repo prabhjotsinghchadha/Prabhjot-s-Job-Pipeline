@@ -16,6 +16,7 @@ import base64
 import copy
 import json
 import logging
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -146,6 +147,8 @@ _PAUSE_GATED_EXACT = {
     "/api/profile/score",
     "/api/yolo",
     "/api/apply-batch",
+    "/api/resume/import",
+    "/api/resume/customize",
 }
 _PAUSE_GATED_PREFIXES = (
     "/api/rescore/",
@@ -819,6 +822,195 @@ async def download_resume(name: str):
 
 
 # ===========================================================================
+# REST API — Resume Builder (structured profile.resume → PDF/DOCX + ATS)
+# ===========================================================================
+
+def _resume_job_context(job_id: str):
+    """(job, tailored, description) for a job id, or (None, None, '') when blank."""
+    if not job_id:
+        return None, None, ""
+    from utils.tracker import get_tailored_resume
+    job = get_job_by_id(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    tailored = get_tailored_resume(job_id) or None
+    desc = job.get("description", "") or f"Job: {job['title']} at {job['company']}"
+    return job, tailored, desc
+
+
+def _job_suffix(job) -> str:
+    """Filename suffix for a per-job render: company, else title, else nothing."""
+    if not job:
+        return ""
+    company = (job.get("company") or "").strip()
+    if company and company.lower() != "unknown":
+        return company
+    return (job.get("title") or "").strip()
+
+
+def _content_disposition(filename: str) -> dict:
+    return {"Content-Disposition": f'attachment; filename="{filename}"'}
+
+
+@app.get("/api/resume/build")
+async def resume_build(format: str = "pdf", job_id: str = ""):
+    """
+    Render the Resume Builder content as pdf | docx | txt and download it.
+    With job_id, the stored tailoring for that job is overlaid (TAILOR first).
+    Pure rendering — no Claude tokens, so not pause-gated.
+    """
+    from utils.resume_builder import build_resume, has_structured_resume
+
+    profile = _load_profile()
+    if not has_structured_resume(profile):
+        raise HTTPException(
+            status_code=400,
+            detail="Resume Builder is empty — fill it in (PROFILE → RESUME BUILDER) "
+                   "or import your uploaded PDF first.",
+        )
+    job, tailored, _ = _resume_job_context(job_id)
+    suffix = _job_suffix(job)
+    try:
+        data, filename, mime = await asyncio.to_thread(build_resume, profile, format, tailored, suffix)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return Response(content=data, media_type=mime, headers=_content_disposition(filename))
+
+
+@app.get("/api/resume/ats")
+async def resume_ats(job_id: str = "", source: str = "builder") -> dict:
+    """
+    ATS report. source=builder scores the rendered builder text (tailored when
+    job_id is given); source=uploaded scores the uploaded PDF on disk. Without
+    a job the profile's keywords + primary skills act as the target list.
+    """
+    from utils.ats_checker import check_ats, check_ats_file, extract_keywords
+    from utils.resume_builder import apply_tailoring, render_text, resume_from_profile
+
+    profile = _load_profile()
+    job, tailored, desc = _resume_job_context(job_id)
+
+    keywords = None
+    if job:
+        keywords = extract_keywords(desc, exclude=[job.get("company") or ""])
+        for kw in (tailored or {}).get("keywords_to_include") or []:
+            if str(kw).strip() and str(kw).lower() not in {k.lower() for k in keywords}:
+                keywords.append(str(kw).strip())
+        keywords = keywords[:50]
+    else:
+        prefs = profile.get("preferences", {})
+        keywords = list(dict.fromkeys(
+            [*(prefs.get("keywords") or []), *((profile.get("skills") or {}).get("primary") or [])]
+        )) or None
+
+    if source == "uploaded":
+        path = profile.get("resume_path", "")
+        if not path or not Path(path).exists():
+            raise HTTPException(status_code=404, detail="No uploaded resume PDF found")
+        report = await asyncio.to_thread(check_ats_file, path, desc, keywords)
+    else:
+        resume = apply_tailoring(resume_from_profile(profile), tailored)
+        report = check_ats(render_text(resume), desc, keywords)
+        report["source"] = "builder" + (" (tailored)" if tailored and job else "")
+
+    report["job_id"] = job_id or None
+    report["tailored"] = bool(tailored and job)
+    return report
+
+
+@app.post("/api/resume/import")
+async def resume_import(body: dict = {}) -> dict:
+    """
+    AI-transcribe an uploaded resume PDF into the structured `resume:` section.
+    Body: {name?: <uploaded resume display name>, save?: bool (default true)}
+    Existing builder content is replaced only when save is true.
+    """
+    import yaml
+    from utils.ats_checker import extract_pdf_text
+    from utils.brain import ClaudeBrain
+    from utils.resume_parser import extract_resume_text
+    from utils.resume_tailor import parse_resume_to_structure
+
+    profile = _load_profile()
+    meta = _load_resume_meta()
+    name = (body.get("name") or "").strip()
+    if name:
+        if name not in meta:
+            raise HTTPException(status_code=404, detail="Resume not found")
+        path = _resumes_dir() / meta[name]["filename"]
+    else:
+        path = Path(profile.get("resume_path", "") or "")
+    if not str(path) or not path.exists():
+        raise HTTPException(status_code=404, detail="No resume PDF to import — upload one first")
+
+    text = extract_resume_text(str(path)) or extract_pdf_text(path)
+    if not text.strip():
+        raise HTTPException(status_code=422, detail="Could not extract text from that PDF")
+
+    brain = ClaudeBrain(verbose=False, profile=profile)
+    data = await asyncio.to_thread(parse_resume_to_structure, text, brain, profile)
+    if not data or not (data.get("experience") or data.get("summary")):
+        raise HTTPException(status_code=502, detail="AI could not structure this resume — try again")
+
+    saved = False
+    if body.get("save", True):
+        existing = profile.get("resume") or {}
+        data["use_tailored_when_applying"] = existing.get("use_tailored_when_applying", True)
+        profile["resume"] = data
+        with open(usercontext.profile_path(), "w") as f:
+            yaml.dump(profile, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+        saved = True
+        await broadcast_event({"type": "resume_imported", "data": {"roles": len(data["experience"])}})
+    return {"resume": data, "saved": saved, "source": str(path)}
+
+
+@app.post("/api/resume/save-as")
+async def resume_save_as(body: dict = {}) -> dict:
+    """
+    Render the builder (optionally tailored for job_id) to a PDF and register it
+    in RESUME MANAGEMENT under `name`; set_default makes it the file adapters
+    upload and emails attach.
+    Body: {name: str, job_id?: str, set_default?: bool}
+    """
+    from utils.resume_builder import build_resume, has_structured_resume
+
+    profile = _load_profile()
+    if not has_structured_resume(profile):
+        raise HTTPException(status_code=400, detail="Resume Builder is empty")
+
+    safe_name = "".join(c for c in (body.get("name") or "") if c.isalnum() or c in " -_").strip()
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="Invalid resume name")
+
+    job, tailored, _ = _resume_job_context(body.get("job_id") or "")
+    suffix = _job_suffix(job)
+    data, filename, _ = await asyncio.to_thread(build_resume, profile, "pdf", tailored, suffix)
+
+    _resumes_dir().mkdir(exist_ok=True)
+    stored = f"{safe_name.replace(' ', '_')}_{filename}"
+    dest = _resumes_dir() / stored
+    dest.write_bytes(data)
+
+    meta = _load_resume_meta()
+    set_default = bool(body.get("set_default")) or len(meta) == 0 or meta.get(safe_name, {}).get("is_default", False)
+    if set_default:
+        for key in meta:
+            meta[key]["is_default"] = False
+    meta[safe_name] = {
+        "filename": stored,
+        "original_name": filename,
+        "is_default": set_default,
+        "built": True,
+        "job_id": job["id"] if job else "",
+        "built_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    _save_resume_meta(meta)
+    if set_default:
+        _update_profile_resume_path(str(dest))
+    return {"name": safe_name, "filename": stored, "is_default": set_default, "bytes": len(data)}
+
+
+# ===========================================================================
 # REST API — Background actions
 # ===========================================================================
 
@@ -972,46 +1164,143 @@ async def rescore_job(job_id: str) -> dict:
     return {"status": "started"}
 
 
-@app.post("/api/jobs/{job_id}/tailor")
-async def tailor_job(job_id: str) -> dict:
-    """Generate tailored resume content for a specific job."""
-    from utils.tracker import get_tailored_resume, update_tailored_resume
+async def _tailor_in_background(job: dict, notes: str = "") -> None:
+    """Run resume tailoring for `job`, store it, broadcast completion."""
+    job_id = job["id"]
+    try:
+        from utils.brain import ClaudeBrain
+        from utils.resume_parser import extract_resume_text
+        from utils.resume_tailor import tailor_resume
+        from utils.tracker import update_tailored_resume
 
+        profile = _load_profile()
+        resume_text = extract_resume_text(profile.get("resume_path", ""))
+        desc = job.get("description", "") or f"Job: {job['title']} at {job['company']}"
+
+        brain = ClaudeBrain(verbose=False, profile=profile)
+        result = await asyncio.to_thread(
+            tailor_resume, desc, resume_text, profile, brain, notes, job.get("company") or ""
+        )
+        update_tailored_resume(job_id, result)
+
+        await broadcast_event({
+            "type": "tailor_complete",
+            "data": {
+                "id": job_id,
+                "has_content": bool(result.get("tailored_summary")),
+                "mode": result.get("mode", ""),
+                "ats_score": (result.get("ats") or {}).get("score"),
+                "suggested_skills": result.get("suggested_skills") or [],
+                "error": result.get("error", ""),
+            }
+        })
+    except Exception as exc:
+        await broadcast_event({
+            "type": "tailor_error",
+            "data": {"id": job_id, "error": str(exc)}
+        })
+
+
+@app.post("/api/jobs/{job_id}/tailor")
+async def tailor_job(job_id: str, body: dict = {}) -> dict:
+    """Generate tailored resume content for a specific job. Body: {notes?}"""
     job = get_job_by_id(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-
-    async def _do_tailor():
-        try:
-            import yaml
-            from utils.resume_tailor import tailor_resume
-            from utils.resume_parser import extract_resume_text
-            from utils.brain import ClaudeBrain
-
-            profile_path = usercontext.profile_path()
-            with open(profile_path) as f:
-                profile = yaml.safe_load(f)
-
-            resume_text = extract_resume_text(profile.get("resume_path", ""))
-            desc = job.get("description", "") or f"Job: {job['title']} at {job['company']}"
-
-            brain = ClaudeBrain(verbose=False, profile=profile)
-            result = tailor_resume(desc, resume_text, profile, brain=brain)
-
-            update_tailored_resume(job_id, result)
-
-            await broadcast_event({
-                "type": "tailor_complete",
-                "data": {"id": job_id, "has_content": bool(result.get("tailored_summary"))}
-            })
-        except Exception as exc:
-            await broadcast_event({
-                "type": "tailor_error",
-                "data": {"id": job_id, "error": str(exc)}
-            })
-
-    asyncio.create_task(_do_tailor())
+    asyncio.create_task(_tailor_in_background(job, (body or {}).get("notes") or ""))
     return {"status": "started", "job_id": job_id}
+
+
+def _fetch_posting_text(url: str) -> str:
+    """Plain text of a job posting page (best effort, no browser)."""
+    import html as _html
+    import httpx
+    r = httpx.get(url, follow_redirects=True, timeout=20,
+                  headers={"User-Agent": "Mozilla/5.0 (compatible; PipelineResumeBuilder)"})
+    r.raise_for_status()
+    t = re.sub(r"<(script|style|noscript|svg)[^>]*>.*?</\1>", " ", r.text, flags=re.S | re.I)
+    t = re.sub(r"<br\s*/?>|</(p|div|li|h\d|tr)>", "\n", t, flags=re.I)
+    t = re.sub(r"<[^>]+>", " ", t)
+    t = _html.unescape(t)
+    t = re.sub(r"[ \t\r\f\v]+", " ", t)
+    t = re.sub(r"\n\s*\n+", "\n", t)
+    return t.strip()[:12000]
+
+
+@app.post("/api/resume/customize")
+async def resume_customize(body: dict) -> dict:
+    """
+    One-click "customise my resume for THIS job": paste a posting (or give a
+    URL), optionally claim extra skills and add notes. The job is stored in
+    the pipeline (platform "manual") so it can be tracked/applied, then the
+    structured tailor runs against it in the background; poll
+    GET /api/jobs/{job_id}/tailor or wait for the tailor_complete event.
+
+    Body: {title, company, url?, description?, extra_skills?: [str], notes?}
+    """
+    import hashlib
+    import yaml
+    from utils.mcp_source import ingest_jobs
+    from utils.resume_builder import has_structured_resume
+    from utils.tracker import get_db
+
+    profile = _load_profile()
+    if not has_structured_resume(profile):
+        raise HTTPException(status_code=400, detail="Fill the Resume Builder first (or IMPORT FROM PDF).")
+
+    title = (body.get("title") or "").strip()
+    company = (body.get("company") or "").strip()
+    url = (body.get("url") or "").strip()
+    description = (body.get("description") or "").strip()
+    notes = (body.get("notes") or "").strip()
+    extra_skills = [str(x).strip() for x in (body.get("extra_skills") or []) if str(x).strip()]
+
+    if not description and url:
+        try:
+            description = await asyncio.to_thread(_fetch_posting_text, url)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"Could not fetch the posting URL ({exc}). Paste the description instead.")
+        if len(description) < 300:
+            raise HTTPException(status_code=422, detail="The page had too little text (login wall or JS-rendered). Paste the description instead.")
+    if not description:
+        raise HTTPException(status_code=400, detail="Paste the job description or give a URL.")
+    if not title:
+        m = re.search(r"^\s*([^\n]{4,80})", description)
+        title = (m.group(1).strip() if m else "Custom role")[:80]
+    company = company or "Unknown"
+
+    # Claimed skills persist in the profile skill pool (secondary skills).
+    if extra_skills:
+        sk = profile.setdefault("skills", {})
+        sec = list(sk.get("secondary") or [])
+        known = {x.lower() for x in [*sec, *(sk.get("primary") or [])]}
+        added = [x for x in extra_skills if x.lower() not in known]
+        if added:
+            sk["secondary"] = sec + added
+            with open(usercontext.profile_path(), "w") as f:
+                yaml.dump(profile, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+    key = f"{title.lower()}|{company.lower()}|{url.lower()}"
+    job_id = "custom_" + hashlib.md5(key.encode()).hexdigest()[:16]
+    ingest_jobs([{
+        "id": job_id, "title": title, "company": company, "url": url, "apply_url": url,
+        "location": "", "description": description, "platform": "manual", "source": "manual",
+    }])
+    # Re-runs refresh the stored posting text and clear stale tailoring.
+    conn = get_db()
+    conn.execute(
+        "UPDATE applications SET description = ?, url = COALESCE(NULLIF(?, ''), url), "
+        "apply_url = COALESCE(NULLIF(?, ''), apply_url), tailored_resume = '' WHERE id = ?",
+        (description, url, url, job_id),
+    )
+    conn.commit()
+    conn.close()
+
+    job = get_job_by_id(job_id)
+    await broadcast_event({"type": "job_added", "data": {"id": job_id, "title": title, "company": company}})
+    asyncio.create_task(_tailor_in_background(job, notes))
+    return {"status": "started", "job_id": job_id, "title": title, "company": company,
+            "description_chars": len(description), "claimed_skills": extra_skills}
 
 
 @app.get("/api/jobs/{job_id}/tailor")
@@ -1163,6 +1452,12 @@ async def apply_single_job(job_id: str, body: dict = {}) -> dict:
 
             brain = ClaudeBrain(verbose=False, profile=profile)
             cover_letter = job.get("cover_letter", "")
+
+            # Upload the per-job tailored PDF when the builder + tailoring exist.
+            from utils.resume_builder import profile_with_resume, resume_path_for_job
+            profile = profile_with_resume(
+                profile, await asyncio.to_thread(resume_path_for_job, profile, job)
+            )
 
             await broadcast_event({
                 "type": "apply_started",
@@ -1334,8 +1629,13 @@ async def apply_batch(body: dict = {}) -> dict:
                         platform = job.get("platform", "")
                         apply_url = job["apply_url"]
 
+                        from utils.resume_builder import profile_with_resume, resume_path_for_job
+                        job_profile = profile_with_resume(
+                            profile, await asyncio.to_thread(resume_path_for_job, profile, job)
+                        )
+
                         success = await apply_smart(
-                            page, apply_url, profile, brain,
+                            page, apply_url, job_profile, brain,
                             cover_letter=cover_letter, dry_run=dry_run,
                             platform=platform,
                             company=job.get("company", ""),
@@ -1653,12 +1953,14 @@ async def email_apply_draft(job_id: str) -> dict:
         brain = ClaudeBrain(verbose=False, profile=profile)
 
     draft = await asyncio.to_thread(compose_application_email, job, profile, brain)
+    from utils.resume_builder import resume_path_for_job
+    attached = await asyncio.to_thread(resume_path_for_job, profile, job)
     return {
         "job_id": job_id,
         "title": job.get("title"),
         "company": job.get("company"),
         **draft,
-        "resume": profile.get("resume_path", ""),
+        "resume": attached,
     }
 
 
@@ -1686,7 +1988,8 @@ async def email_apply_send(job_id: str, body: dict) -> dict:
     profile = _load_profile()
     try:
         smtp_config(profile)  # fail fast with the config message
-        resume = profile.get("resume_path", "")
+        from utils.resume_builder import resume_path_for_job
+        resume = await asyncio.to_thread(resume_path_for_job, profile, job)
         await asyncio.to_thread(
             send_application_email, profile, to, subject, text,
             resume if resume and Path(resume).exists() else "",
@@ -1866,12 +2169,19 @@ async def bulk_apply_send(body: dict) -> dict:
                 result = {"job_id": jid, "title": job.get("title"),
                           "company": job.get("company"), "to": item.get("to")}
                 try:
+                    # Per-job tailored PDF when available, else the default file.
+                    job_resume = resume
+                    if job:
+                        from utils.resume_builder import resume_path_for_job
+                        candidate = await asyncio.to_thread(resume_path_for_job, profile, job)
+                        if candidate and Path(candidate).exists():
+                            job_resume = candidate
                     await asyncio.to_thread(
                         send_application_email, profile,
                         (item.get("to") or "").strip(),
                         (item.get("subject") or "").strip(),
                         (item.get("body") or "").strip(),
-                        resume,
+                        job_resume,
                     )
                     log_applied(jid, True)
                     note = (f"Applied via email to {item.get('to')} on "

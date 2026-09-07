@@ -145,6 +145,15 @@ function pipeline() {
     tailorData: {},
     tailoring: {},
 
+    // ----- Resume Builder (PROFILE → RESUME BUILDER) -----
+    atsReport: null,
+    atsChecking: false,
+    resumeImporting: false,
+    customize: {
+      company: "", title: "", url: "", description: "", extra_skills: "", notes: "",
+      running: false, job_id: "", result: null, error: "",
+    },
+
     // ----- Cover Letter Templates -----
     coverLetterTemplates: [],
     newTemplateName: "",
@@ -156,6 +165,7 @@ function pipeline() {
       workAuth: false,
       sources: true,
       resumes: true,
+      resumeBuilder: true,
       coverLetters: false,
       jobPrefs: true,
       skills: false,
@@ -914,6 +924,295 @@ function pipeline() {
           this.tailorData[jobId] = data;
         }
       } catch (_) {}
+    },
+
+    // ===================================================================
+    // RESUME BUILDER — structured profile.resume → PDF/DOCX + ATS
+    // ===================================================================
+
+    ensureResumeSection() {
+      const cur = this.fullProfile.resume;
+      const r = cur && typeof cur === "object" && !Array.isArray(cur) ? cur : {};
+      const defaults = {
+        headline: "", summary: "", skills: [], experience: [], education: [],
+        projects: [], certifications: [], awards: [], languages: [],
+        use_tailored_when_applying: true,
+      };
+      for (const [k, v] of Object.entries(defaults)) {
+        if (r[k] === undefined || r[k] === null) r[k] = v;
+      }
+      // Tolerate legacy/hand-edited shapes: strings for list fields, string certs.
+      for (const k of ["skills", "experience", "education", "projects", "certifications", "awards", "languages"]) {
+        if (!Array.isArray(r[k])) r[k] = typeof r[k] === "string" ? this.splitLines(r[k]) : [];
+      }
+      r.certifications = r.certifications.map((c) =>
+        typeof c === "string" ? { name: c, issuer: "", year: "" } : c,
+      );
+      this.fullProfile.resume = r;
+    },
+
+    splitLines(s) {
+      return String(s || "").split("\n").map((x) => x.trim()).filter(Boolean);
+    },
+
+    splitCsv(s) {
+      return String(s || "").split(",").map((x) => x.trim()).filter(Boolean);
+    },
+
+    resumeItemTemplate(kind) {
+      switch (kind) {
+        case "skills": return { category: "", items: [] };
+        case "experience": return { company: "", title: "", location: "", start: "", end: "Present", tagline: "", bullets: [] };
+        case "education": return { degree: "", school: "", location: "", start: "", end: "", details: "" };
+        case "projects": return { name: "", url: "", description: "", tech: [], bullets: [] };
+        case "certifications": return { name: "", issuer: "", year: "" };
+        default: return {};
+      }
+    },
+
+    addResumeItem(kind) {
+      this.ensureResumeSection();
+      this.fullProfile.resume[kind].push(this.resumeItemTemplate(kind));
+      this.scheduleProfileSave();
+    },
+
+    removeResumeItem(kind, i) {
+      if (!confirm("Remove this entry from the resume?")) return;
+      this.fullProfile.resume[kind].splice(i, 1);
+      this.scheduleProfileSave();
+    },
+
+    moveResumeItem(kind, i, dir) {
+      const arr = this.fullProfile.resume[kind];
+      const j = i + dir;
+      if (j < 0 || j >= arr.length) return;
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+      this.scheduleProfileSave();
+    },
+
+    setResumeField(obj, key, value) {
+      obj[key] = value;
+      this.scheduleProfileSave();
+    },
+
+    async flushProfileSave() {
+      if (this.profileSaveTimer) {
+        clearTimeout(this.profileSaveTimer);
+        this.profileSaveTimer = null;
+        await this.saveFullProfile();
+      }
+    },
+
+    atsScoreClass(score) {
+      if (score === null || score === undefined) return "text-[#64748b]";
+      return score >= 85 ? "text-emerald-400" : score >= 70 ? "text-cyan-400"
+        : score >= 55 ? "text-amber-400" : "text-rose-400";
+    },
+
+    atsChipClass(score) {
+      if (score === null || score === undefined) return "text-[#64748b] border-[#1e293b]";
+      return score >= 85 ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/10"
+        : score >= 70 ? "text-cyan-400 border-cyan-500/30 bg-cyan-500/10"
+        : score >= 55 ? "text-amber-400 border-amber-500/30 bg-amber-500/10"
+        : "text-rose-400 border-rose-500/30 bg-rose-500/10";
+    },
+
+    async _apiError(res) {
+      const err = await res.json().catch(() => ({}));
+      return new Error(err.detail || res.statusText || `HTTP ${res.status}`);
+    },
+
+    // Downloads go through fetch (not <a href>) so the auth wrapper applies.
+    async downloadBuiltResume(fmt, jobId = "") {
+      await this.flushProfileSave();
+      try {
+        const qs = new URLSearchParams({ format: fmt });
+        if (jobId) qs.set("job_id", jobId);
+        const res = await fetch(`/api/resume/build?${qs}`);
+        if (!res.ok) throw await this._apiError(res);
+        const blob = await res.blob();
+        const cd = res.headers.get("Content-Disposition") || "";
+        const m = cd.match(/filename="?([^";]+)"?/);
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = m ? m[1] : `resume.${fmt}`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+        this.notify(`${jobId ? "Tailored resume" : "Resume"} ${fmt.toUpperCase()} downloaded.`, "success");
+      } catch (err) {
+        this.notify("Download failed: " + err.message, "error");
+      }
+    },
+
+    async runAtsCheck(jobId = "", source = "builder") {
+      await this.flushProfileSave();
+      this.atsChecking = true;
+      try {
+        const qs = new URLSearchParams({ source });
+        if (jobId) qs.set("job_id", jobId);
+        const res = await fetch(`/api/resume/ats?${qs}`);
+        if (!res.ok) throw await this._apiError(res);
+        this.atsReport = await res.json();
+        this.profileSections.resumeBuilder = true;
+      } catch (err) {
+        this.notify("ATS check failed: " + err.message, "error");
+      } finally {
+        this.atsChecking = false;
+      }
+    },
+
+    async importResumeFromPdf() {
+      const hasContent = (this.fullProfile.resume?.experience || []).length > 0;
+      if (hasContent && !confirm(
+        "Replace the current Resume Builder content with an AI transcription of your default uploaded PDF?",
+      )) return;
+      this.resumeImporting = true;
+      this.notify("Transcribing your PDF with AI — this takes about a minute...", "info");
+      try {
+        const res = await fetch("/api/resume/import", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ save: true }),
+        });
+        if (!res.ok) throw await this._apiError(res);
+        const data = await res.json();
+        await this.loadFullProfile();
+        this.notify(`Imported ${data.resume?.experience?.length || 0} roles into the Resume Builder.`, "success");
+        this.addFeedItem("Resume imported into builder", "#8b5cf6");
+      } catch (err) {
+        this.notify("Import failed: " + err.message, "error");
+      } finally {
+        this.resumeImporting = false;
+      }
+    },
+
+    // ----- One-click "customize for this job" -----
+    _loadCustomizeState() {
+      try {
+        const saved = JSON.parse(localStorage.getItem("mrjobs.customize") || "null");
+        if (saved && typeof saved === "object") {
+          Object.assign(this.customize, saved, { running: false, error: "" });
+          if (this.customize.job_id) this._refreshCustomizeResult();
+        }
+      } catch (_) {}
+    },
+
+    _saveCustomizeState() {
+      try {
+        const { company, title, url, description, extra_skills, notes, job_id } = this.customize;
+        localStorage.setItem("mrjobs.customize",
+          JSON.stringify({ company, title, url, description, extra_skills, notes, job_id }));
+      } catch (_) {}
+    },
+
+    async runCustomize() {
+      const c = this.customize;
+      if (!c.description.trim() && !c.url.trim()) {
+        c.error = "Paste the job description or give a URL.";
+        return;
+      }
+      await this.flushProfileSave();
+      c.running = true; c.error = ""; c.result = null;
+      try {
+        const res = await fetch("/api/resume/customize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            company: c.company.trim(), title: c.title.trim(), url: c.url.trim(),
+            description: c.description.trim(), notes: c.notes.trim(),
+            extra_skills: this.splitCsv(c.extra_skills),
+          }),
+        });
+        if (!res.ok) throw await this._apiError(res);
+        const data = await res.json();
+        c.job_id = data.job_id;
+        if (!c.title) c.title = data.title;
+        if (!c.company || c.company === "Unknown") c.company = data.company;
+        if (data.claimed_skills?.length) {
+          c.extra_skills = "";
+          this.loadFullProfile(); // skill pool changed
+        }
+        this._saveCustomizeState();
+        this.tailoring[c.job_id] = true;
+        this.notify("Customizing your resume for this job — tailoring runs in the background...", "info");
+        this.fetchJobs?.();
+      } catch (err) {
+        c.running = false;
+        c.error = err.message;
+        this.notify("Customize failed: " + err.message, "error");
+      }
+    },
+
+    async _refreshCustomizeResult() {
+      const c = this.customize;
+      if (!c.job_id) return;
+      try {
+        const res = await fetch(`/api/jobs/${c.job_id}/tailor`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data && (data.tailored_summary || data.error)) {
+          c.result = data;
+          this.tailorData[c.job_id] = data;
+          if (data.error) c.error = data.error;
+        }
+      } catch (_) {}
+    },
+
+    async claimSkill(skill) {
+      if (!skill) return;
+      this.ensureResumeSection();
+      if (!this.fullProfile.skills) this.fullProfile.skills = { primary: [], secondary: [] };
+      if (!Array.isArray(this.fullProfile.skills.secondary)) this.fullProfile.skills.secondary = [];
+      const have = [...(this.fullProfile.skills.primary || []), ...this.fullProfile.skills.secondary]
+        .map((s) => String(s).toLowerCase());
+      if (!have.includes(skill.toLowerCase())) this.fullProfile.skills.secondary.push(skill);
+      await this.saveFullProfile();
+      this.notify(`Claimed "${skill}" — re-customizing with it in your skill pool.`, "info");
+      await this.runCustomize();
+    },
+
+    resetCustomize() {
+      Object.assign(this.customize, {
+        company: "", title: "", url: "", description: "", extra_skills: "", notes: "",
+        running: false, job_id: "", result: null, error: "",
+      });
+      try { localStorage.removeItem("mrjobs.customize"); } catch (_) {}
+    },
+
+    openCustomizedJob() {
+      const id = this.customize.job_id;
+      if (!id) return;
+      this.currentView = "dashboard";
+      this.filters.search = this.customize.company && this.customize.company !== "Unknown"
+        ? this.customize.company : this.customize.title;
+      this.fetchJobs?.();
+      this.expandedJob = id;
+      this.jobNotes[id] = this.jobNotes[id] || "";
+      this.fetchTailorData(id);
+    },
+
+    async saveBuiltAsResume(jobId = "", company = "") {
+      await this.flushProfileSave();
+      const suggested = jobId ? `Tailored - ${company || jobId.substring(0, 8)}` : "Built Resume";
+      const name = prompt("Save the generated PDF to RESUME MANAGEMENT as:", suggested);
+      if (!name || !name.trim()) return;
+      const setDefault = jobId
+        ? false
+        : confirm("Make this the DEFAULT resume used for applications and email attachments?");
+      try {
+        const res = await fetch("/api/resume/save-as", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: name.trim(), job_id: jobId, set_default: setDefault }),
+        });
+        if (!res.ok) throw await this._apiError(res);
+        await this.loadResumes();
+        this.notify(`Saved "${name.trim()}"${setDefault ? " as default resume" : ""}.`, "success");
+      } catch (err) {
+        this.notify("Save failed: " + err.message, "error");
+      }
     },
 
     // ===================================================================
@@ -1772,7 +2071,19 @@ function pipeline() {
 
         case "tailor_complete":
           this.tailoring[event.data.id] = false;
-          this.notify("Resume tailoring complete!", "success");
+          if (event.data.id === this.customize.job_id) {
+            this.customize.running = false;
+            this._refreshCustomizeResult();
+          }
+          if (event.data.error) {
+            this.notify(`Tailoring failed: ${event.data.error}`, "error");
+          } else {
+            const ats = event.data.ats_score;
+            this.notify(
+              `Resume tailoring complete!${ats !== null && ats !== undefined ? ` ATS score ${ats}/100.` : ""}`,
+              "success",
+            );
+          }
           this.addFeedItem(
             `Tailored resume for ${event.data.id?.substring(0, 8)}`,
             "#8b5cf6",
@@ -1782,6 +2093,10 @@ function pipeline() {
 
         case "tailor_error":
           this.tailoring[event.data.id] = false;
+          if (event.data.id === this.customize.job_id) {
+            this.customize.running = false;
+            this.customize.error = event.data.error;
+          }
           this.notify(`Tailoring error: ${event.data.error}`, "error");
           break;
 
@@ -2182,6 +2497,11 @@ function pipeline() {
       try {
         const res = await fetch("/api/profile");
         this.fullProfile = await res.json();
+        this.ensureResumeSection();
+        if (!this._customizeLoaded) {
+          this._customizeLoaded = true;
+          this._loadCustomizeState();
+        }
         this.coverLetterTemplates =
           this.fullProfile.cover_letter_templates || [];
       } catch (err) {

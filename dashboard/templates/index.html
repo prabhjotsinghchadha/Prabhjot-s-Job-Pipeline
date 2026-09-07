@@ -21,7 +21,7 @@
     </script>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-    <script defer src="/static/app.js?v=20260828e"></script>
+    <script defer src="/static/app.js?v=20260907c"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 
     <link rel="stylesheet" href="/static/style.css?v=20260828a" />
@@ -809,7 +809,29 @@
 
                                             <!-- Tailored Resume Section -->
                                             <div x-show="tailorData[job.id]" class="md:col-span-2 mt-4 p-3 rounded-lg bg-[#0a0e17] border border-violet-500/20">
-                                                <h4 class="text-xs font-semibold uppercase tracking-wider text-violet-400 mb-3" style="font-family: var(--font-mono);">Tailored Resume</h4>
+                                                <div class="flex items-center justify-between flex-wrap gap-2 mb-3">
+                                                    <h4 class="text-xs font-semibold uppercase tracking-wider text-violet-400" style="font-family: var(--font-mono);">Tailored Resume</h4>
+                                                    <div class="flex items-center gap-3 text-[0.6rem] font-mono">
+                                                        <span x-show="tailorData[job.id]?.ats?.score !== undefined"
+                                                              class="px-2 py-0.5 rounded border"
+                                                              :class="atsChipClass(tailorData[job.id]?.ats?.score)"
+                                                              :title="'ATS score of the tailored resume vs this posting (keywords ' + (tailorData[job.id]?.ats?.keyword_score ?? '-') + '%, format ' + (tailorData[job.id]?.ats?.format_score ?? '-') + '%)'"
+                                                              x-text="'ATS ' + tailorData[job.id]?.ats?.score"></span>
+                                                        <template x-if="tailorData[job.id]?.mode === 'structured'">
+                                                            <span class="flex items-center gap-3">
+                                                                <button @click.stop="downloadBuiltResume('pdf', job.id)" class="text-cyan-500 hover:text-cyan-300">&#8681; PDF</button>
+                                                                <button @click.stop="downloadBuiltResume('docx', job.id)" class="text-cyan-500 hover:text-cyan-300">&#8681; DOCX</button>
+                                                                <button @click.stop="saveBuiltAsResume(job.id, job.company)" class="text-cyan-500 hover:text-cyan-300" title="Store this tailored PDF in Resume Management">SAVE PDF</button>
+                                                            </span>
+                                                        </template>
+                                                        <span x-show="tailorData[job.id]?.mode === 'legacy'" class="text-[#475569]" title="Fill PROFILE → RESUME BUILDER to get downloadable tailored files">notes only — fill Resume Builder for files</span>
+                                                    </div>
+                                                </div>
+
+                                                <div x-show="tailorData[job.id]?.tailored_headline" class="mb-3">
+                                                    <p class="text-xs text-[#64748b] uppercase tracking-wider mb-1" style="font-family: var(--font-mono);">Headline</p>
+                                                    <p class="text-sm text-[#e2e8f0]" x-text="tailorData[job.id]?.tailored_headline"></p>
+                                                </div>
 
                                                 <div x-show="tailorData[job.id]?.tailored_summary" class="mb-3">
                                                     <p class="text-xs text-[#64748b] uppercase tracking-wider mb-1" style="font-family: var(--font-mono);">Summary</p>
@@ -833,6 +855,15 @@
                                                     <div class="flex flex-wrap gap-1">
                                                         <template x-for="kw in (tailorData[job.id]?.keywords_to_include || [])" :key="kw">
                                                             <span class="tag-chip text-violet-400 border-violet-500/30" x-text="kw"></span>
+                                                        </template>
+                                                    </div>
+                                                </div>
+
+                                                <div x-show="tailorData[job.id]?.ats?.missing_keywords?.length" class="mb-3">
+                                                    <p class="text-xs text-[#64748b] uppercase tracking-wider mb-1" style="font-family: var(--font-mono);">Posting keywords still missing (ATS)</p>
+                                                    <div class="flex flex-wrap gap-1">
+                                                        <template x-for="kw in (tailorData[job.id]?.ats?.missing_keywords || []).slice(0, 15)" :key="kw">
+                                                            <span class="tag-chip text-rose-400 border-rose-500/30" x-text="kw"></span>
                                                         </template>
                                                     </div>
                                                 </div>
@@ -1549,6 +1580,14 @@
                         <span class="ml-auto text-[0.55rem]" x-text="profileSections.resumes ? '\u25BC' : '\u25B6'"></span>
                     </div>
                     <div x-show="profileSections.resumes" x-transition class="p-4 space-y-3">
+                        <!-- Quick downloads from the Resume Builder -->
+                        <div class="flex items-center justify-between gap-2 p-2.5 rounded-lg border border-violet-500/20 bg-violet-500/5">
+                            <span class="text-[0.62rem] font-mono text-[#94a3b8]">Generated from RESUME BUILDER (ATS-friendly):</span>
+                            <div class="flex gap-2">
+                                <button @click="downloadBuiltResume('pdf')" class="cmd-btn primary text-[0.6rem] py-1 px-3">&#8681; PDF</button>
+                                <button @click="downloadBuiltResume('docx')" class="cmd-btn primary text-[0.6rem] py-1 px-3">&#8681; DOCX</button>
+                            </div>
+                        </div>
                         <!-- Upload zone -->
                         <div class="drop-zone" :class="resumeDragActive ? 'active' : ''"
                              @dragover.prevent="resumeDragActive = true"
@@ -1600,6 +1639,321 @@
                                 No resumes uploaded yet. Upload your first PDF above.
                             </div>
                         </template>
+                    </div>
+                </div>
+
+                <!-- RESUME BUILDER -->
+                <div class="mc-panel">
+                    <div class="mc-panel-header cursor-pointer" @click="toggleSection('resumeBuilder')">
+                        <span class="dot" style="background:#8b5cf6;box-shadow:0 0 6px rgba(139,92,246,0.4)"></span>
+                        RESUME BUILDER
+                        <span class="ml-2 text-[0.5rem] text-[#64748b]">ATS-FRIENDLY PDF + DOCX</span>
+                        <span class="ml-auto text-[0.55rem]" x-text="profileSections.resumeBuilder ? '▼' : '▶'"></span>
+                    </div>
+                    <div x-show="profileSections.resumeBuilder" x-transition class="p-4 space-y-4">
+
+                        <!-- Toolbar -->
+                        <div class="flex flex-wrap gap-2 items-center">
+                            <button @click="downloadBuiltResume('pdf')" class="cmd-btn primary text-[0.6rem] py-1.5 px-3">&#8681; PDF</button>
+                            <button @click="downloadBuiltResume('docx')" class="cmd-btn primary text-[0.6rem] py-1.5 px-3">&#8681; DOCX</button>
+                            <button @click="runAtsCheck()" :disabled="atsChecking"
+                                    class="cmd-btn secondary text-[0.6rem] py-1.5 px-3"
+                                    x-text="atsChecking ? 'CHECKING...' : 'ATS CHECK'"></button>
+                            <button @click="runAtsCheck('', 'uploaded')" :disabled="atsChecking"
+                                    class="cmd-btn secondary text-[0.6rem] py-1.5 px-3"
+                                    title="Score the uploaded default PDF instead of the builder">ATS: UPLOADED PDF</button>
+                            <button @click="saveBuiltAsResume()" class="cmd-btn secondary text-[0.6rem] py-1.5 px-3"
+                                    title="Render a PDF into Resume Management and optionally make it the default">SAVE AS RESUME</button>
+                            <button @click="importResumeFromPdf()" :disabled="resumeImporting"
+                                    class="cmd-btn secondary text-[0.6rem] py-1.5 px-3"
+                                    title="AI-transcribe your default uploaded PDF into these fields"
+                                    x-text="resumeImporting ? 'IMPORTING...' : 'IMPORT FROM PDF (AI)'"></button>
+                        </div>
+                        <label class="flex items-center gap-2 text-[0.65rem] font-mono text-[#94a3b8] cursor-pointer">
+                            <input type="checkbox"
+                                   :checked="fullProfile.resume?.use_tailored_when_applying !== false"
+                                   @change="updateProfileField('resume.use_tailored_when_applying', $event.target.checked)" />
+                            Upload the per-job TAILORED PDF when applying (falls back to the default PDF when a job has no tailoring)
+                        </label>
+
+                        <!-- One-click customise for a specific job -->
+                        <div class="p-3 rounded-lg border border-violet-500/30 bg-violet-500/5 space-y-2">
+                            <div class="flex items-center justify-between">
+                                <span class="text-[0.65rem] font-mono font-bold text-violet-300 uppercase tracking-wider">&#10022; Customize for a job</span>
+                                <span class="text-[0.55rem] font-mono text-[#64748b]">paste the posting → one click → tailored PDF/DOCX</span>
+                            </div>
+                            <div class="grid grid-cols-2 gap-2">
+                                <input type="text" class="mc-input text-[0.7rem]" placeholder="Company" x-model="customize.company" />
+                                <input type="text" class="mc-input text-[0.7rem]" placeholder="Role title" x-model="customize.title" />
+                            </div>
+                            <input type="url" class="mc-input text-[0.7rem]" placeholder="Job URL (optional — fetched when description is empty)" x-model="customize.url" />
+                            <textarea rows="5" class="mc-input text-[0.72rem] resize-y" placeholder="Paste the full job description here (requirements, responsibilities, nice-to-haves)." x-model="customize.description"></textarea>
+                            <input type="text" class="mc-input text-[0.7rem]" placeholder="Extra skills you have for THIS role, comma-separated (added to your skill pool)" x-model="customize.extra_skills" />
+                            <input type="text" class="mc-input text-[0.7rem]" placeholder="Notes for the AI (e.g. applying via referral, emphasise fintech + leadership)" x-model="customize.notes" />
+                            <div class="flex items-center gap-2 flex-wrap">
+                                <button @click="runCustomize()" :disabled="customize.running"
+                                        class="cmd-btn primary text-[0.6rem] py-1.5 px-3"
+                                        x-text="customize.running ? 'CUSTOMIZING... (~1-2 MIN)' : '✦ CUSTOMIZE RESUME'"></button>
+                                <button x-show="customize.job_id && !customize.running" @click="runCustomize()"
+                                        class="cmd-btn secondary text-[0.6rem] py-1.5 px-3">RE-RUN</button>
+                                <button x-show="customize.job_id || customize.description" @click="resetCustomize()"
+                                        class="text-[0.6rem] font-mono text-[#64748b] hover:text-[#e2e8f0]">CLEAR</button>
+                                <span x-show="customize.error" class="text-[0.62rem] font-mono text-rose-400" x-text="customize.error"></span>
+                            </div>
+
+                            <!-- Result -->
+                            <div x-show="customize.result" x-cloak class="mt-2 p-3 rounded-lg bg-[#0a0e17] border border-[#1e293b] space-y-2">
+                                <div class="flex items-center justify-between flex-wrap gap-2">
+                                    <div class="text-[0.65rem] font-mono text-[#94a3b8]">
+                                        Tailored for <span class="text-[#e2e8f0]" x-text="customize.company || 'Unknown'"></span> · <span class="text-[#e2e8f0]" x-text="customize.title"></span>
+                                    </div>
+                                    <div class="flex items-center gap-3 text-[0.6rem] font-mono">
+                                        <span x-show="customize.result?.ats?.score !== undefined" class="px-2 py-0.5 rounded border"
+                                              :class="atsChipClass(customize.result?.ats?.score)"
+                                              x-text="'ATS ' + customize.result?.ats?.score + ' (' + customize.result?.ats?.grade + ')'"></span>
+                                        <button @click="downloadBuiltResume('pdf', customize.job_id)" class="cmd-btn primary text-[0.6rem] py-1 px-3">&#8681; PDF</button>
+                                        <button @click="downloadBuiltResume('docx', customize.job_id)" class="cmd-btn primary text-[0.6rem] py-1 px-3">&#8681; DOCX</button>
+                                        <button @click="saveBuiltAsResume(customize.job_id, customize.company)" class="text-cyan-500 hover:text-cyan-300">SAVE PDF</button>
+                                        <button @click="openCustomizedJob()" class="text-cyan-500 hover:text-cyan-300" title="The job was added to your pipeline — track or APPLY from there">OPEN IN PIPELINE</button>
+                                    </div>
+                                </div>
+                                <div x-show="customize.result?.tailored_headline">
+                                    <p class="text-[0.58rem] font-mono uppercase tracking-wider text-[#64748b]">Headline</p>
+                                    <p class="text-sm text-[#e2e8f0]" x-text="customize.result?.tailored_headline"></p>
+                                </div>
+                                <div x-show="customize.result?.tailored_summary">
+                                    <p class="text-[0.58rem] font-mono uppercase tracking-wider text-[#64748b]">Summary</p>
+                                    <p class="text-[0.78rem] text-[#e2e8f0]" x-text="customize.result?.tailored_summary"></p>
+                                </div>
+                                <div x-show="customize.result?.tailored_skills?.length">
+                                    <p class="text-[0.58rem] font-mono uppercase tracking-wider text-[#64748b] mb-1">Skills as they will appear</p>
+                                    <template x-for="g in (customize.result?.tailored_skills || [])" :key="g.category">
+                                        <p class="text-[0.72rem] text-[#e2e8f0]"><span class="font-semibold" x-text="g.category ? g.category + ': ' : ''"></span><span x-text="g.items.join(', ')"></span></p>
+                                    </template>
+                                </div>
+                                <div x-show="customize.result?.suggested_skills?.length">
+                                    <p class="text-[0.58rem] font-mono uppercase tracking-wider text-amber-400 mb-1">The posting wants these — do you have them? Click to claim &amp; re-run</p>
+                                    <div class="flex flex-wrap gap-1">
+                                        <template x-for="kw in (customize.result?.suggested_skills || [])" :key="kw">
+                                            <button @click="claimSkill(kw)" class="tag-chip text-amber-300 border-amber-500/40 hover:bg-amber-500/10 cursor-pointer" :title="'Add ' + kw + ' to your skill pool and re-customize'">+ <span x-text="kw"></span></button>
+                                        </template>
+                                    </div>
+                                </div>
+                                <div x-show="customize.result?.ats?.missing_keywords?.length">
+                                    <p class="text-[0.58rem] font-mono uppercase tracking-wider text-[#64748b] mb-1">Posting keywords still missing</p>
+                                    <div class="flex flex-wrap gap-1">
+                                        <template x-for="kw in (customize.result?.ats?.missing_keywords || []).slice(0, 15)" :key="kw">
+                                            <span class="tag-chip text-rose-400 border-rose-500/30" x-text="kw"></span>
+                                        </template>
+                                    </div>
+                                </div>
+                                <p class="text-[0.58rem] font-mono text-[#475569]">Only skills from your profile / resume are added automatically. Claimed skills persist in PROFILE → SKILLS (secondary).</p>
+                            </div>
+                        </div>
+
+                        <!-- ATS report -->
+                        <div x-show="atsReport" x-cloak class="p-3 rounded-lg bg-[#0a0e17] border border-[#1e293b] space-y-2">
+                            <div class="flex items-center gap-3 flex-wrap">
+                                <span class="text-2xl font-bold font-mono" :class="atsScoreClass(atsReport?.score)" x-text="atsReport?.score"></span>
+                                <div class="text-[0.62rem] font-mono text-[#64748b] leading-relaxed">
+                                    ATS SCORE &middot; grade <span class="text-[#e2e8f0]" x-text="atsReport?.grade"></span>
+                                    <span x-show="atsReport?.keyword_score !== null && atsReport?.keyword_score !== undefined">
+                                        &middot; keywords <span class="text-[#e2e8f0]" x-text="atsReport?.keyword_score + '%'"></span>
+                                        (<span x-text="atsReport?.matched_keywords?.length"></span>/<span x-text="atsReport?.keywords_checked"></span>)
+                                    </span>
+                                    &middot; format <span class="text-[#e2e8f0]" x-text="atsReport?.format_score + '%'"></span>
+                                    &middot; <span x-text="(atsReport?.stats?.words || 0) + ' words'"></span>
+                                    &middot; source <span class="text-[#e2e8f0]" x-text="atsReport?.source"></span>
+                                </div>
+                                <button @click="atsReport = null" class="ml-auto text-[0.6rem] font-mono text-[#64748b] hover:text-[#e2e8f0]">DISMISS</button>
+                            </div>
+                            <div x-show="atsReport?.missing_keywords?.length">
+                                <p class="text-[0.6rem] font-mono uppercase tracking-wider text-[#64748b] mb-1">Missing keywords</p>
+                                <div class="flex flex-wrap gap-1">
+                                    <template x-for="kw in (atsReport?.missing_keywords || [])" :key="kw">
+                                        <span class="tag-chip text-rose-400 border-rose-500/30" x-text="kw"></span>
+                                    </template>
+                                </div>
+                            </div>
+                            <ul class="space-y-1">
+                                <template x-for="iss in (atsReport?.issues || [])" :key="iss.message">
+                                    <li class="text-[0.68rem] text-[#94a3b8]">
+                                        <span class="font-mono uppercase text-[0.55rem] mr-1"
+                                              :class="iss.severity === 'high' ? 'text-rose-400' : iss.severity === 'medium' ? 'text-amber-400' : 'text-[#64748b]'"
+                                              x-text="iss.severity"></span>
+                                        <span x-text="iss.message"></span>
+                                    </li>
+                                </template>
+                            </ul>
+                            <p x-show="!atsReport?.issues?.length" class="text-[0.68rem] text-emerald-400 font-mono">No format issues detected.</p>
+                        </div>
+
+                        <!-- Headline + summary -->
+                        <div>
+                            <label class="pref-label">Headline</label>
+                            <input type="text" class="mc-input" placeholder="e.g. Senior Full Stack Engineer · TypeScript / Next.js / Node.js"
+                                   :value="fullProfile.resume?.headline || ''"
+                                   @blur="updateProfileField('resume.headline', $event.target.value)" />
+                        </div>
+                        <div>
+                            <label class="pref-label">Professional Summary</label>
+                            <textarea rows="4" class="mc-input resize-y text-[0.78rem]" placeholder="2–3 sentences: level, stack, biggest measurable wins."
+                                      :value="fullProfile.resume?.summary || ''"
+                                      @blur="updateProfileField('resume.summary', $event.target.value)"></textarea>
+                        </div>
+
+                        <!-- Skills groups -->
+                        <div>
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="pref-label">Core Skills (grouped — "Category: a, b, c")</span>
+                                <button @click="addResumeItem('skills')" class="text-[0.6rem] font-mono text-cyan-500 hover:text-cyan-300">+ GROUP</button>
+                            </div>
+                            <template x-for="(g, i) in (fullProfile.resume?.skills || [])" :key="'sk' + i">
+                                <div class="flex gap-2 mb-2 items-center">
+                                    <input type="text" class="mc-input text-[0.7rem] w-1/3" placeholder="Category"
+                                           :value="g.category || ''" @blur="setResumeField(g, 'category', $event.target.value)" />
+                                    <input type="text" class="mc-input text-[0.7rem] flex-1" placeholder="Comma-separated skills, most relevant first"
+                                           :value="(g.items || []).join(', ')" @blur="setResumeField(g, 'items', splitCsv($event.target.value))" />
+                                    <button @click="removeResumeItem('skills', i)" class="text-rose-500 hover:text-rose-300 text-sm px-1" title="Remove group">&times;</button>
+                                </div>
+                            </template>
+                        </div>
+
+                        <!-- Experience -->
+                        <div>
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="pref-label">Professional Experience (most recent first)</span>
+                                <button @click="addResumeItem('experience')" class="text-[0.6rem] font-mono text-cyan-500 hover:text-cyan-300">+ ROLE</button>
+                            </div>
+                            <div class="space-y-3">
+                                <template x-for="(e, i) in (fullProfile.resume?.experience || [])" :key="'ex' + i">
+                                    <div class="p-3 border border-[#1e293b] rounded-lg space-y-2">
+                                        <div class="flex items-center justify-between">
+                                            <span class="text-[0.6rem] font-mono text-[#64748b]" x-text="'ROLE ' + (i + 1) + (e.company ? ' · ' + e.company : '')"></span>
+                                            <div class="flex gap-3 text-[0.6rem] font-mono">
+                                                <button @click="moveResumeItem('experience', i, -1)" class="text-cyan-500 hover:text-cyan-300" title="Move up">&#9650;</button>
+                                                <button @click="moveResumeItem('experience', i, 1)" class="text-cyan-500 hover:text-cyan-300" title="Move down">&#9660;</button>
+                                                <button @click="removeResumeItem('experience', i)" class="text-rose-500 hover:text-rose-300">REMOVE</button>
+                                            </div>
+                                        </div>
+                                        <div class="grid grid-cols-2 gap-2">
+                                            <input type="text" class="mc-input text-[0.7rem]" placeholder="Title"
+                                                   :value="e.title || ''" @blur="setResumeField(e, 'title', $event.target.value)" />
+                                            <input type="text" class="mc-input text-[0.7rem]" placeholder="Company"
+                                                   :value="e.company || ''" @blur="setResumeField(e, 'company', $event.target.value)" />
+                                            <input type="text" class="mc-input text-[0.7rem]" placeholder="Location (e.g. Remote)"
+                                                   :value="e.location || ''" @blur="setResumeField(e, 'location', $event.target.value)" />
+                                            <div class="grid grid-cols-2 gap-2">
+                                                <input type="text" class="mc-input text-[0.7rem]" placeholder="Start (Jan 2023)"
+                                                       :value="e.start || ''" @blur="setResumeField(e, 'start', $event.target.value)" />
+                                                <input type="text" class="mc-input text-[0.7rem]" placeholder="End / Present"
+                                                       :value="e.end || ''" @blur="setResumeField(e, 'end', $event.target.value)" />
+                                            </div>
+                                        </div>
+                                        <input type="text" class="mc-input text-[0.7rem]" placeholder="Tagline — one-line company description (optional)"
+                                               :value="e.tagline || ''" @blur="setResumeField(e, 'tagline', $event.target.value)" />
+                                        <textarea rows="4" class="mc-input text-[0.72rem] resize-y" placeholder="One achievement per line. Start with an action verb, include numbers."
+                                                  :value="(e.bullets || []).join('\n')"
+                                                  @blur="setResumeField(e, 'bullets', splitLines($event.target.value))"></textarea>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+
+                        <!-- Education -->
+                        <div>
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="pref-label">Education</span>
+                                <button @click="addResumeItem('education')" class="text-[0.6rem] font-mono text-cyan-500 hover:text-cyan-300">+ DEGREE</button>
+                            </div>
+                            <template x-for="(e, i) in (fullProfile.resume?.education || [])" :key="'ed' + i">
+                                <div class="p-3 border border-[#1e293b] rounded-lg space-y-2 mb-2">
+                                    <div class="grid grid-cols-2 gap-2">
+                                        <input type="text" class="mc-input text-[0.7rem]" placeholder="Degree"
+                                               :value="e.degree || ''" @blur="setResumeField(e, 'degree', $event.target.value)" />
+                                        <input type="text" class="mc-input text-[0.7rem]" placeholder="School"
+                                               :value="e.school || ''" @blur="setResumeField(e, 'school', $event.target.value)" />
+                                        <input type="text" class="mc-input text-[0.7rem]" placeholder="Location"
+                                               :value="e.location || ''" @blur="setResumeField(e, 'location', $event.target.value)" />
+                                        <div class="grid grid-cols-2 gap-2">
+                                            <input type="text" class="mc-input text-[0.7rem]" placeholder="Start"
+                                                   :value="e.start || ''" @blur="setResumeField(e, 'start', $event.target.value)" />
+                                            <input type="text" class="mc-input text-[0.7rem]" placeholder="End"
+                                                   :value="e.end || ''" @blur="setResumeField(e, 'end', $event.target.value)" />
+                                        </div>
+                                    </div>
+                                    <div class="flex gap-2">
+                                        <input type="text" class="mc-input text-[0.7rem] flex-1" placeholder="Details (GPA, honors, thesis — optional)"
+                                               :value="e.details || ''" @blur="setResumeField(e, 'details', $event.target.value)" />
+                                        <button @click="removeResumeItem('education', i)" class="text-rose-500 hover:text-rose-300 text-[0.6rem] font-mono">REMOVE</button>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+
+                        <!-- Projects -->
+                        <div>
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="pref-label">Projects</span>
+                                <button @click="addResumeItem('projects')" class="text-[0.6rem] font-mono text-cyan-500 hover:text-cyan-300">+ PROJECT</button>
+                            </div>
+                            <template x-for="(p, i) in (fullProfile.resume?.projects || [])" :key="'pr' + i">
+                                <div class="p-3 border border-[#1e293b] rounded-lg space-y-2 mb-2">
+                                    <div class="grid grid-cols-2 gap-2">
+                                        <input type="text" class="mc-input text-[0.7rem]" placeholder="Project name"
+                                               :value="p.name || ''" @blur="setResumeField(p, 'name', $event.target.value)" />
+                                        <input type="text" class="mc-input text-[0.7rem]" placeholder="URL (optional)"
+                                               :value="p.url || ''" @blur="setResumeField(p, 'url', $event.target.value)" />
+                                    </div>
+                                    <input type="text" class="mc-input text-[0.7rem]" placeholder="One-line description"
+                                           :value="p.description || ''" @blur="setResumeField(p, 'description', $event.target.value)" />
+                                    <input type="text" class="mc-input text-[0.7rem]" placeholder="Technologies, comma-separated"
+                                           :value="(p.tech || []).join(', ')" @blur="setResumeField(p, 'tech', splitCsv($event.target.value))" />
+                                    <div class="flex gap-2 items-start">
+                                        <textarea rows="2" class="mc-input text-[0.72rem] resize-y flex-1" placeholder="Bullets, one per line (optional)"
+                                                  :value="(p.bullets || []).join('\n')"
+                                                  @blur="setResumeField(p, 'bullets', splitLines($event.target.value))"></textarea>
+                                        <button @click="removeResumeItem('projects', i)" class="text-rose-500 hover:text-rose-300 text-[0.6rem] font-mono mt-1">REMOVE</button>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+
+                        <!-- Certifications / Awards / Languages -->
+                        <div>
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="pref-label">Certifications</span>
+                                <button @click="addResumeItem('certifications')" class="text-[0.6rem] font-mono text-cyan-500 hover:text-cyan-300">+ CERT</button>
+                            </div>
+                            <template x-for="(c, i) in (fullProfile.resume?.certifications || [])" :key="'ce' + i">
+                                <div class="flex gap-2 mb-2 items-center">
+                                    <input type="text" class="mc-input text-[0.7rem] flex-1" placeholder="Certification"
+                                           :value="c.name || ''" @blur="setResumeField(c, 'name', $event.target.value)" />
+                                    <input type="text" class="mc-input text-[0.7rem] w-1/4" placeholder="Issuer"
+                                           :value="c.issuer || ''" @blur="setResumeField(c, 'issuer', $event.target.value)" />
+                                    <input type="text" class="mc-input text-[0.7rem] w-20" placeholder="Year"
+                                           :value="c.year || ''" @blur="setResumeField(c, 'year', $event.target.value)" />
+                                    <button @click="removeResumeItem('certifications', i)" class="text-rose-500 hover:text-rose-300 text-sm px-1">&times;</button>
+                                </div>
+                            </template>
+                        </div>
+                        <div class="grid grid-cols-2 gap-3">
+                            <div>
+                                <label class="pref-label">Awards (one per line)</label>
+                                <textarea rows="2" class="mc-input text-[0.72rem] resize-y"
+                                          :value="(fullProfile.resume?.awards || []).join('\n')"
+                                          @blur="updateProfileField('resume.awards', splitLines($event.target.value))"></textarea>
+                            </div>
+                            <div>
+                                <label class="pref-label">Languages (one per line)</label>
+                                <textarea rows="2" class="mc-input text-[0.72rem] resize-y"
+                                          :value="(fullProfile.resume?.languages || []).join('\n')"
+                                          @blur="updateProfileField('resume.languages', splitLines($event.target.value))"></textarea>
+                            </div>
+                        </div>
+                        <p class="text-[0.6rem] font-mono text-[#475569]">
+                            Edits save automatically. Contact details come from IDENTITY above. TAILOR on any job rewrites summary, bullets and skills from this data; the tailored PDF is uploaded when applying.
+                        </p>
                     </div>
                 </div>
 
