@@ -20,9 +20,6 @@ resumes/
 .vscode/
 .idea/
 
-# Playwright MCP
-.playwright-mcp/
-
 # Claude
 .claude/
 
@@ -43,9 +40,6 @@ profile.yaml
 # Screenshots (may contain PII from live sessions)
 *.png
 
-
-# Node (Railway IaC SDK only)
-node_modules/
 system_state.json
 
 # Recovered DB copies (contain personal pipeline data)

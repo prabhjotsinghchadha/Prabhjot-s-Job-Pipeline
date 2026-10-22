@@ -1,204 +1,106 @@
 """
-Claude Code CLI Brain — Uses `claude` CLI as the reasoning engine.
+Claude Code CLI brain — every AI call in the app goes through here.
 
-Instead of paying for API calls, this shells out to the Claude Code CLI
-which is included in your Pro/Max subscription.
-
-Supports pluggable LLM backends via profile.yaml `ai` section.
-When a profile with `ai` config is provided, requests are routed through
-the configured backend per component. Without a profile, falls back to
-direct Claude CLI calls (original behavior).
+Shells out to `claude -p --output-format json`, which uses the Pro/Max
+subscription instead of API credits. The subprocess MUST run without the
+CLAUDECODE env var or a nested-session error is raised.
 """
 
-import os
-import subprocess
 import json
+import os
 import re
-import hashlib
-from pathlib import Path
+import subprocess
 from typing import Optional
-
-def CACHE_DIR_FN():
-    from utils.usercontext import cache_dir
-    return cache_dir()
-
-
-def cover_letters_auto(profile: dict) -> bool:
-    """True when scoring should write a cover letter for every matching job.
-
-    profile.yaml → preferences.cover_letters: "auto" (default, legacy
-    behaviour) or "on_demand" (letters only via the dashboard GENERATE
-    button / the cover-letter endpoint, or when actually applying).
-    """
-    mode = str((profile or {}).get("preferences", {}).get("cover_letters", "auto")).lower()
-    return mode not in ("on_demand", "ondemand", "manual", "off", "false")
 
 
 class ClaudeBrain:
-    """Interface to AI reasoning — routes through pluggable LLM backends."""
-
-    def __init__(self, verbose: bool = True, profile: dict = None):
+    def __init__(self, verbose: bool = True, profile: dict = None, timeout: int = 120):
         self.verbose = verbose
-        self.profile = profile
+        self.profile = profile or {}
+        self.timeout = timeout
         self._verify_cli()
 
-    def _verify_cli(self):
-        """Check that claude CLI is installed and accessible (skipped if not needed)."""
-        # Skip CLI check if profile uses a non-CLI backend for all components
-        if self.profile:
-            ai_config = self.profile.get("ai", {})
-            default = ai_config.get("default_backend", "claude_cli")
-            components = ai_config.get("components", {})
-            all_backends = set(components.values()) | {default}
-            if "claude_cli" not in all_backends:
-                if self.verbose:
-                    print(f"  🧠 Using non-CLI backends: {', '.join(all_backends)}")
-                return
+    # ------------------------------------------------------------------ core
 
+    def _verify_cli(self):
         try:
-            result = subprocess.run(
-                ["claude", "--version"],
-                capture_output=True, text=True, timeout=10
-            )
-            if result.returncode != 0:
-                raise RuntimeError(
-                    "Claude CLI not responding. Install with: "
-                    "npm install -g @anthropic-ai/claude-code"
-                )
-            if self.verbose:
-                version = result.stdout.strip()
-                print(f"  🧠 Claude CLI ready: {version}")
+            result = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=10)
         except FileNotFoundError:
             raise RuntimeError(
                 "Claude CLI not found. Install with:\n"
-                "  npm install -g @anthropic-ai/claude-code\n"
-                "Then run: claude auth"
+                "  npm install -g @anthropic-ai/claude-code\nThen run: claude auth"
             )
-
-    def ask(self, prompt: str, timeout: int = 120, component: str = "general") -> str:
-        """
-        Send a prompt to the configured LLM backend.
-
-        When a profile with `ai` config is available, routes through the
-        pluggable backend for the given component. Otherwise falls back to
-        direct Claude CLI calls (original behavior).
-        """
+        if result.returncode != 0:
+            raise RuntimeError("Claude CLI not responding. Run `claude auth` and try again.")
         if self.verbose:
-            preview = prompt[:80].replace('\n', ' ')
-            print(f"  AI: {preview}...")
+            print(f"  Claude CLI ready: {result.stdout.strip()}")
 
-        # Route through pluggable backend if profile is available
-        if self.profile:
-            from utils.llm import get_backend
-            backend = get_backend(component, self.profile)
-            return backend.ask(prompt, timeout=timeout)
-
-        # Fallback: direct Claude CLI (original behavior)
+    def ask(self, prompt: str, timeout: Optional[int] = None) -> str:
+        """Send a prompt, return the text response."""
+        if self.verbose:
+            print(f"  AI: {prompt[:80].replace(chr(10), ' ')}...")
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         result = subprocess.run(
             ["claude", "-p", "--output-format", "json"],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env
+            input=prompt, capture_output=True, text=True,
+            timeout=timeout or self.timeout, env=env,
         )
-
         if result.returncode != 0:
-            error_msg = result.stderr.strip() or "Unknown error"
-            raise RuntimeError(f"Claude CLI error: {error_msg}")
-
-        # Parse the JSON output
+            raise RuntimeError(f"Claude CLI error: {result.stderr.strip() or 'unknown error'}")
         try:
-            data = json.loads(result.stdout)
-            # Claude Code JSON output has a "result" field
-            return data.get("result", result.stdout)
+            return json.loads(result.stdout).get("result", result.stdout)
         except json.JSONDecodeError:
-            # Fallback: return raw stdout
             return result.stdout.strip()
 
-    def ask_json(self, prompt: str, timeout: int = 120, component: str = "general") -> dict:
-        """Ask the LLM and parse JSON from the response."""
-        # Route through pluggable backend if profile is available
-        if self.profile:
-            from utils.llm import get_backend
-            backend = get_backend(component, self.profile)
-            return backend.ask_json(prompt, timeout=timeout)
-
-        # Fallback: original behavior
-        full_prompt = prompt + (
-            "\n\nIMPORTANT: Respond ONLY with valid JSON. "
-            "No markdown fencing, no explanation, no preamble. Just the JSON object."
+    def ask_json(self, prompt: str, timeout: Optional[int] = None):
+        """Send a prompt, parse the JSON it returns (object or array)."""
+        raw = self.ask(
+            prompt + "\n\nIMPORTANT: Respond ONLY with valid JSON. No markdown fencing, no preamble.",
+            timeout=timeout,
         )
-        raw = self.ask(full_prompt, timeout=timeout)
-
-        # Strip markdown code fences if present
-        cleaned = raw.strip()
-        cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned)
-        cleaned = re.sub(r'\s*```$', '', cleaned)
-        cleaned = cleaned.strip()
-
+        cleaned = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
         try:
             return json.loads(cleaned)
         except json.JSONDecodeError as e:
             if self.verbose:
-                print(f"  Warning: JSON parse failed, raw response:\n{raw[:500]}")
-            raise ValueError(f"LLM didn't return valid JSON: {e}")
+                print(f"  Warning: JSON parse failed:\n{raw[:500]}")
+            raise ValueError(f"Claude did not return valid JSON: {e}")
 
-    def ask_cached(self, prompt: str, cache_key: Optional[str] = None) -> str:
-        """Ask with disk caching — useful for repeated identical questions."""
-        if cache_key is None:
-            cache_key = hashlib.md5(prompt.encode()).hexdigest()
+    # --------------------------------------------------------------- prompts
 
-        cache_file = CACHE_DIR_FN() / f"{cache_key}.txt"
-        if cache_file.exists():
-            if self.verbose:
-                print(f"  💾 Cache hit: {cache_key}")
-            return cache_file.read_text()
-
-        result = self.ask(prompt)
-        cache_file.write_text(result)
-        return result
-
-    def match_job(self, job_description: str, profile: dict, resume_text: str = "") -> dict:
-        """Score a job posting against the user's profile with enhanced context."""
-        # Build enhanced profile context
+    def _applicant_block(self, profile: dict, resume_text: str) -> str:
+        prefs = profile.get("preferences", {})
         skills = profile.get("skills", {})
-        primary_skills = ", ".join(skills.get("primary", profile["preferences"].get("keywords", [])))
-        secondary_skills = ", ".join(skills.get("secondary", []))
-        ideal_job = profile.get("ideal_job_description", "")
-        favorites = profile.get("favorite_companies", [])
-        min_score = profile["preferences"].get("min_match_score", 65)
-        # preferences.cover_letters: "auto" writes a letter for every job that
-        # clears the threshold during scoring; "on_demand" leaves it out so
-        # letters are only generated when the user asks (or when applying).
-        auto_letters = cover_letters_auto(profile)
-        if auto_letters:
-            cover_letter_field = (
-                '  "cover_letter": "<2-3 paragraph tailored cover letter, '
-                'or empty string — see rule below>",\n'
-            )
-            cover_letter_rule = (
-                f"- Write the cover_letter ONLY if score >= {min_score}; otherwise set "
-                'cover_letter to "" — do not waste effort on poor matches\n'
-            )
-        else:
-            cover_letter_field = ""
-            cover_letter_rule = "- Do NOT write a cover letter; it is generated separately on request\n"
-
-        prompt = f"""You are a job matching engine. Be critical and honest.
-
-APPLICANT PROFILE:
-- Roles sought: {', '.join(profile['preferences']['roles'])}
-- Primary skills: {primary_skills}
-- Secondary skills: {secondary_skills}
-- Location preference: {', '.join(profile['preferences']['locations'])}
-- Remote only: {profile['preferences']['remote_only']}
-- Ideal job: {ideal_job[:500]}
-- Favorite companies (bonus +10 if match): {', '.join(favorites)}
+        primary = ", ".join(skills.get("primary", prefs.get("keywords", [])))
+        secondary = ", ".join(skills.get("secondary", []))
+        favorites = ", ".join(profile.get("favorite_companies", []))
+        return f"""APPLICANT PROFILE:
+- Roles sought: {', '.join(prefs.get('roles', []))}
+- Primary skills: {primary}
+- Secondary skills: {secondary}
+- Location preference: {', '.join(prefs.get('locations', []))}
+- Remote only: {prefs.get('remote_only', False)}
+- Ideal job: {profile.get('ideal_job_description', '')[:500]}
+- Favorite companies (bonus +10 if match): {favorites}
 
 APPLICANT RESUME:
-{resume_text[:4000] if resume_text else '(No resume provided)'}
+{resume_text[:4000] if resume_text else '(No resume provided)'}"""
+
+    _SCORING_RULES = """Scoring guidelines (be critical and honest):
+- 90-100: Perfect match (role, skills, location all align)
+- 70-89: Strong match (most criteria met)
+- 50-69: Partial match (some gaps but worth considering)
+- Below 50: Poor match
+- Penalise hard conflicts heavily: on-site when the applicant is remote-only,
+  citizenship/visa requirements the applicant cannot meet, wrong seniority.
+- If the company is in the favorites list, add 10 bonus points (max 100)."""
+
+    def match_job(self, job_description: str, profile: dict, resume_text: str = "") -> dict:
+        """Score ONE posting. Returns {score, reasoning, skill_overlap, missing_skills, red_flags}."""
+        prompt = f"""You are a job matching engine.
+
+{self._applicant_block(profile, resume_text)}
 
 JOB POSTING:
 {job_description[:8000]}
@@ -206,44 +108,76 @@ JOB POSTING:
 Return this exact JSON structure:
 {{
   "score": <integer 0-100>,
-  "apply": <true or false>,
   "reasoning": "<one sentence explaining the score>",
-  "title_match": "<how well the title matches>",
   "skill_overlap": ["<matching skills>"],
   "missing_skills": ["<skills they want that applicant lacks>"],
-  "red_flags": ["<any concerns>"],
-{cover_letter_field}  "improve_match": "<one suggestion to improve match for this job>"
+  "red_flags": ["<any concerns>"]
 }}
 
-Scoring guidelines:
-- 90-100: Perfect match (role, skills, location all align)
-- 70-89: Strong match (most criteria met)
-- 50-69: Partial match (some gaps but worth considering)
-- Below 50: Poor match
-- If the company is in the favorites list, add 10 bonus points (max 100)
-- Set "apply" to true only if score >= {profile['preferences'].get('min_match_score', 65)}
-{cover_letter_rule}"""
-        result = self.ask_json(prompt, component="scoring")
-        if not auto_letters and isinstance(result, dict):
-            result["cover_letter"] = ""
+{self._SCORING_RULES}"""
+        result = self.ask_json(prompt)
+        if not isinstance(result, dict):
+            raise ValueError("Expected a JSON object")
         return result
 
-    def write_cover_letter(
-        self, job_description: str, profile: dict, resume_text: str = "",
-        company: str = "", title: str = "",
-    ) -> str:
-        """Write a cover letter for ONE job on demand (preferences.cover_letters
-        = on_demand keeps this out of scoring so tokens are only spent on jobs
-        the user actually wants)."""
+    def match_jobs(self, jobs: list, profile: dict, resume_text: str = "",
+                   per_job_chars: int = 3000) -> dict:
+        """
+        Score SEVERAL postings in one call. `jobs` is a list of dicts with
+        id, title, company, location, description. Returns {job_id: result}.
+        Jobs missing from the response are simply absent from the dict.
+        """
+        blocks = []
+        for j in jobs:
+            desc = (j.get("description") or "").strip() or "(no description available)"
+            blocks.append(
+                f"--- JOB id={j['id']} ---\n"
+                f"Title: {j.get('title', '')}\nCompany: {j.get('company', '')}\n"
+                f"Location: {j.get('location', '')}\n{desc[:per_job_chars]}"
+            )
+        prompt = f"""You are a job matching engine. Score each posting below independently.
+
+{self._applicant_block(profile, resume_text)}
+
+JOB POSTINGS ({len(jobs)}):
+{chr(10).join(blocks)}
+
+Return this exact JSON structure, one entry per posting, same ids as given:
+{{
+  "results": [
+    {{
+      "id": "<job id>",
+      "score": <integer 0-100>,
+      "reasoning": "<one sentence explaining the score>",
+      "skill_overlap": ["<matching skills>"],
+      "missing_skills": ["<skills they want that applicant lacks>"],
+      "red_flags": ["<any concerns>"]
+    }}
+  ]
+}}
+
+{self._SCORING_RULES}"""
+        result = self.ask_json(prompt, timeout=max(self.timeout, 60 + 20 * len(jobs)))
+        entries = result.get("results", []) if isinstance(result, dict) else result
+        wanted = {str(j["id"]) for j in jobs}
+        out = {}
+        for e in entries or []:
+            if isinstance(e, dict) and str(e.get("id")) in wanted and "score" in e:
+                out[str(e["id"])] = e
+        return out
+
+    def write_cover_letter(self, job_description: str, profile: dict, resume_text: str = "",
+                           company: str = "", title: str = "") -> str:
         personal = profile.get("personal", {})
+        name = f"{personal.get('first_name', '')} {personal.get('last_name', '')}".strip()
         skills = profile.get("skills", {})
-        primary_skills = ", ".join(skills.get("primary", profile["preferences"].get("keywords", [])))
-        heading = f"{title} at {company}" if title or company else "the posting below"
+        primary = ", ".join(skills.get("primary", profile.get("preferences", {}).get("keywords", [])))
+        heading = f"{title} at {company}" if (title or company) else "the posting below"
         prompt = f"""Write a tailored cover letter for {heading}.
 
 APPLICANT:
-- Name: {personal.get('name', '')}
-- Primary skills: {primary_skills}
+- Name: {name}
+- Primary skills: {primary}
 - Ideal job: {profile.get('ideal_job_description', '')[:500]}
 
 APPLICANT RESUME:
@@ -259,90 +193,6 @@ Rules:
 - End with a one-line sign-off using the applicant's name.
 
 Return this exact JSON structure:
-{{
-  "cover_letter": "<the letter>"
-}}
-"""
-        result = self.ask_json(prompt, component="cover_letter")
+{{"cover_letter": "<the letter>"}}"""
+        result = self.ask_json(prompt)
         return (result.get("cover_letter") or "").strip() if isinstance(result, dict) else ""
-
-    def score_profile(self, profile: dict, resume_text: str = "") -> dict:
-        """Analyze the user's profile and resume for job market readiness."""
-        skills = profile.get("skills", {})
-        primary = ", ".join(skills.get("primary", []))
-        secondary = ", ".join(skills.get("secondary", []))
-        roles = ", ".join(profile["preferences"]["roles"])
-        ideal = profile.get("ideal_job_description", "")
-
-        prompt = f"""Analyze this job seeker's profile and resume for job market readiness.
-
-PROFILE:
-- Target roles: {roles}
-- Primary skills: {primary}
-- Secondary skills: {secondary}
-- Ideal job: {ideal[:500]}
-- Location: {profile['personal'].get('location', 'Not specified')}
-
-RESUME TEXT:
-{resume_text[:6000] if resume_text else '(No resume provided)'}
-
-Return a JSON assessment:
-{{
-  "profile_score": <0-100>,
-  "strengths": ["<top 3 strengths>"],
-  "gaps": ["<skills or experience gaps>"],
-  "resume_suggestions": ["<specific resume improvements>"],
-  "keyword_recommendations": ["<keywords to add to profile>"],
-  "role_fit": {{
-    "<role name>": <0-100 fit score>
-  }},
-  "summary": "<2-3 sentence overall assessment>"
-}}
-"""
-        return self.ask_json(prompt, timeout=180, component="profile_analysis")
-
-    def answer_question(self, question: str, profile: dict, context: str = "") -> str:
-        """Answer a custom application question using AI."""
-        return self.ask(f"""You are filling out a job application for someone.
-Answer this question concisely and professionally (1-3 sentences max).
-
-Applicant info:
-- Name: {profile['personal']['first_name']} {profile['personal']['last_name']}
-- Location: {profile['personal']['location']}
-- Looking for: {', '.join(profile['preferences']['roles'])}
-
-Additional context: {context}
-
-Question: {question}
-
-Answer (be concise, direct, professional):""", component="form_analysis")
-
-    def analyze_form(self, form_html: str, profile: dict) -> list:
-        """Analyze a form's HTML and return fill instructions."""
-        return self.ask_json(f"""You are a form-filling automation assistant.
-
-APPLICANT PROFILE:
-{json.dumps(profile['personal'], indent=2)}
-
-COMMON ANSWERS:
-{json.dumps(profile.get('common_answers', {}), indent=2)}
-
-FORM HTML (may be truncated):
-{form_html[:12000]}
-
-Analyze every visible input field. Return a JSON array of actions:
-[
-  {{"action": "fill", "selector": "<CSS selector>", "value": "<text to type>", "field_name": "<what field this is>"}},
-  {{"action": "select", "selector": "<CSS selector>", "value": "<option value>", "field_name": "<what field>"}},
-  {{"action": "check", "selector": "<CSS selector>", "field_name": "<what checkbox>"}},
-  {{"action": "upload", "selector": "<CSS selector>", "file_key": "resume", "field_name": "resume upload"}},
-  {{"action": "click", "selector": "<CSS selector>", "field_name": "submit button"}}
-]
-
-Rules:
-- Use the most specific CSS selector possible (prefer #id, then [name=...], then [aria-label=...])
-- For file uploads, always set file_key to "resume"
-- Put the submit/next button click LAST
-- Skip hidden fields and CSRF tokens
-- For dropdowns, use the actual option value attribute
-""", component="form_analysis")

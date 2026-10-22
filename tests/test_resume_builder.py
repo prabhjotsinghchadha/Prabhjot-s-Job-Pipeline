@@ -234,8 +234,8 @@ class TestResumePathForJob:
         assert resume_path_for_job(p, self.JOB, {}) == "base.pdf"
 
     def test_writes_tailored_pdf(self, tmp_path, monkeypatch):
-        import utils.usercontext as uc
-        monkeypatch.setattr(uc, "resumes_dir", lambda: tmp_path)
+        import utils.paths as paths
+        monkeypatch.setattr(paths, "resumes_dir", lambda: tmp_path)
         p = {**PROFILE, "resume_path": "base.pdf"}
         out = resume_path_for_job(p, self.JOB, {"tailored_summary": "Tailored for Acme"})
         assert out == str(tmp_path / "tailored" / "job123.pdf")

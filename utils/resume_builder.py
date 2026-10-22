@@ -685,11 +685,11 @@ def build_resume(profile: dict, fmt: str = "pdf", tailored: Optional[dict] = Non
 
 
 # ---------------------------------------------------------------------------
-# Tailored PDF on disk — what the apply adapters upload
+# Tailored PDF on disk — what gets attached to email applies / downloaded
 # ---------------------------------------------------------------------------
 
 def tailored_dir() -> Path:
-    from utils.usercontext import resumes_dir
+    from utils.paths import resumes_dir
     d = resumes_dir() / "tailored"
     d.mkdir(parents=True, exist_ok=True)
     return d
@@ -731,7 +731,7 @@ def resume_path_for_job(profile: dict, job: dict, tailored: Optional[dict] = Non
 
 
 def profile_with_resume(profile: dict, path: str) -> dict:
-    """Shallow copy of profile pointing resume_path at `path` (adapters read that key)."""
+    """Shallow copy of profile pointing resume_path at `path`."""
     if not path or path == profile.get("resume_path"):
         return profile
     p = dict(profile)

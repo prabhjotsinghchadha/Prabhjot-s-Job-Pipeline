@@ -23,13 +23,8 @@ class _EventBus:
         self._listeners = [l for l in self._listeners if l != callback]
 
     def emit(self, event_type: str, data: Any = None):
-        """Broadcast an event to all listeners, tagged with the emitting user."""
+        """Broadcast an event to all listeners."""
         event = {"type": event_type, "data": data}
-        try:
-            from utils.usercontext import current_uid
-            event["uid"] = current_uid()
-        except Exception:
-            pass  # No user context (e.g. startup) — event stays untagged
         for listener in self._listeners:
             try:
                 listener(event)

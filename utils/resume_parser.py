@@ -6,9 +6,7 @@ Caches extracted text to avoid re-parsing every time.
 import hashlib
 from pathlib import Path
 
-def CACHE_DIR_FN():
-    from utils.usercontext import cache_dir
-    return cache_dir()
+from utils.paths import cache_dir
 
 
 def extract_resume_text(resume_path: str) -> str:
@@ -22,7 +20,7 @@ def extract_resume_text(resume_path: str) -> str:
 
     # Cache key based on file content hash
     file_hash = hashlib.md5(path.read_bytes()).hexdigest()
-    cache_file = CACHE_DIR_FN() / f"resume_{file_hash}.txt"
+    cache_file = cache_dir() / f"resume_{file_hash}.txt"
 
     if cache_file.exists():
         return cache_file.read_text()

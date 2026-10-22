@@ -15,13 +15,4 @@ services:
       # CLAUDE_CODE_OAUTH_TOKEN — from `claude setup-token`, uses a Pro/Max subscription
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
-      # Optional HTTP Basic auth for the dashboard. Blank = no auth (local).
-      # Required when hosting anywhere reachable from outside this machine.
-      - DASHBOARD_USER=${DASHBOARD_USER:-admin}
-      - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:-}
-      # Multi-tenant mode (Firebase Auth). All blank = single-user mode.
-      # See DEPLOY_RAILWAY.md "Multi-tenant mode" for setup.
-      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID:-}
-      - FIREBASE_WEB_CONFIG=${FIREBASE_WEB_CONFIG:-}
-      - ALLOWED_EMAILS=${ALLOWED_EMAILS:-}
     restart: unless-stopped

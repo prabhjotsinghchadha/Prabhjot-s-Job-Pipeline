@@ -9,21 +9,20 @@ import json
 from datetime import datetime, date
 from pathlib import Path
 
-from utils.usercontext import db_path as _user_db_path
-
-# Legacy constant kept for external references; in multi-tenant mode the
-# actual path comes from the current user's context at connect time.
-DB_PATH = Path(__file__).parent.parent / "applications.db"
+from utils.paths import db_path as _db_path
 
 # All valid statuses
+# The pipeline, in order. `saved` = "save for later" from the Inbox.
 VALID_STATUSES = [
-    "discovered", "matched", "applied", "skipped", "failed",
-    "interviewing", "offer", "rejected", "withdrawn", "archived", "ignored"
+    "discovered", "matched", "saved", "applied", "interviewing", "offer",
+    "rejected", "skipped", "archived",
 ]
+# Statuses from earlier versions are folded into the list above on connect.
+_LEGACY_STATUS = {"failed": "skipped", "ignored": "skipped", "withdrawn": "archived"}
 
 
 def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(_user_db_path())
+    conn = sqlite3.connect(_db_path())
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
@@ -92,6 +91,8 @@ def _migrate_schema(conn: sqlite3.Connection):
                 conn.execute(f"ALTER TABLE applications ADD COLUMN {col} {col_type}")
             except sqlite3.OperationalError:
                 pass  # Column already exists
+    for old, new in _LEGACY_STATUS.items():
+        conn.execute("UPDATE applications SET status = ? WHERE status = ?", (new, old))
 
 
 def is_already_seen(job_id: str) -> bool:
@@ -163,7 +164,7 @@ def log_matched(job_id: str, score: int, reasoning: str, cover_letter: str) -> N
 
 def log_applied(job_id: str, success: bool) -> None:
     """Mark a job as applied and set follow-up if successful."""
-    status = "applied" if success else "failed"
+    status = "applied" if success else "skipped"
     now = datetime.now().isoformat()
     conn = get_db()
     if success:
@@ -239,42 +240,11 @@ def print_stats():
     print(f"   Matched:    {s['matched']}")
     print(f"   Applied:    {s['applied']} (today: {s['today']})")
     print(f"   Skipped:    {s['skipped']}")
-    print(f"   Failed:     {s['failed']}")
     if s['avg_match_score']:
         print(f"   Avg Score:  {s['avg_match_score']}")
 
 
-def reset_unscored() -> int:
-    """Reset jobs with NULL match_score back to 'discovered' for re-processing."""
-    conn = get_db()
-    cursor = conn.execute("""
-        UPDATE applications SET status = 'discovered'
-        WHERE match_score IS NULL AND status != 'applied'
-    """)
-    count = cursor.rowcount
-    conn.commit()
-    conn.close()
-    return count
 
-
-def delete_all() -> int:
-    """Delete all jobs for a fresh start."""
-    conn = get_db()
-    cursor = conn.execute("DELETE FROM applications")
-    count = cursor.rowcount
-    conn.commit()
-    conn.close()
-    return count
-
-
-def get_jobs_by_status(status: str) -> list:
-    """Get all jobs with a given status."""
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT * FROM applications WHERE status = ?", (status,)
-    ).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
 
 
 def get_unscored_jobs() -> list:
@@ -320,8 +290,9 @@ def get_all_jobs(
         params = []
 
         if status:
-            conditions.append("status = ?")
-            params.append(status)
+            wanted = [x.strip() for x in status.split(",") if x.strip()]
+            conditions.append(f"status IN ({','.join('?' * len(wanted))})")
+            params.extend(wanted)
         if company:
             conditions.append("company LIKE ?")
             params.append(f"%{company}%")
@@ -335,7 +306,7 @@ def get_all_jobs(
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
         # Validate sort column
-        valid_sorts = ["discovered_at", "match_score", "company", "title", "status", "applied_at"]
+        valid_sorts = ["discovered_at", "match_score", "company", "title", "status", "applied_at", "last_activity", "follow_up_date"]
         if sort_by not in valid_sorts:
             sort_by = "discovered_at"
         if sort_order not in ("asc", "desc"):
@@ -623,43 +594,9 @@ def ignore_jobs(job_ids: list) -> int:
                 "INSERT OR IGNORE INTO ignored_hashes (hash, title, company) VALUES (?, ?, ?)",
                 (h, row["title"], row["company"])
             )
-            conn.execute("UPDATE applications SET status = 'ignored' WHERE id = ?", (jid,))
+            conn.execute("UPDATE applications SET status = 'skipped' WHERE id = ?", (jid,))
             count += 1
     conn.commit()
     conn.close()
     _emit("jobs_ignored", {"count": count})
     return count
-
-
-def purge_all() -> dict:
-    """Nuke all discovery data but preserve the ignore list."""
-    conn = get_db()
-    job_count = conn.execute("SELECT COUNT(*) FROM applications").fetchone()[0]
-    conn.execute("DELETE FROM applications")
-    conn.commit()
-    conn.close()
-    _emit("purged", {"jobs_deleted": job_count})
-    return {"jobs_deleted": job_count}
-
-
-def purge_everything() -> dict:
-    """Nuke ALL data including ignore list — full factory reset."""
-    conn = get_db()
-    job_count = conn.execute("SELECT COUNT(*) FROM applications").fetchone()[0]
-    ignore_count = conn.execute("SELECT COUNT(*) FROM ignored_hashes").fetchone()[0]
-    conn.execute("DELETE FROM applications")
-    conn.execute("DELETE FROM ignored_hashes")
-    conn.commit()
-    conn.close()
-    _emit("purged", {"jobs_deleted": job_count, "ignores_cleared": ignore_count})
-    return {"jobs_deleted": job_count, "ignores_cleared": ignore_count}
-
-
-def get_ignored_count() -> int:
-    """Count of hashes in the ignore list."""
-    conn = get_db()
-    row = conn.execute("SELECT COUNT(*) FROM ignored_hashes").fetchone()
-    conn.close()
-    return row[0]
-
-

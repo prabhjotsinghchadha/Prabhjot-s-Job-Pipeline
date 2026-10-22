@@ -1,25 +1,17 @@
 """
 Global pause switch — one flag that halts every automated, token-consuming
-operation: scheduled jobs, discovery, scoring, YOLO cycles, and applies.
-
-Deliberately global rather than per-user: scoring runs through the deployer's
-Claude CLI session, so any tenant's background work spends the same OAuth
-token budget. Persisted as a tiny JSON file in the data root so a pause
-survives server restarts and redeploys (on Railway, keep DATA_DIR on a
-volume so the flag outlives the container).
+operation: scheduled jobs, discovery, scoring, tailoring. Persisted as a tiny
+JSON file in the data dir so a pause survives restarts.
 """
 
 import json
 from datetime import datetime
 from pathlib import Path
 
-from utils.usercontext import data_root
+from utils.paths import state_path as _state_path
 
 _DEFAULT_STATE = {"paused": False, "paused_at": None, "paused_by": ""}
 
-
-def _state_path() -> Path:
-    return data_root() / "system_state.json"
 
 
 def get_state() -> dict:
