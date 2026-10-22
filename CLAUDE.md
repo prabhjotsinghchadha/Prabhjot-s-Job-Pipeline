@@ -1,376 +1,55 @@
-# Prabhjot's Pipeline — Prabhjot's Pipeline Intelligence System
+# Pipeline — notes for Claude sessions
 
-> **You are the mission operator of a fully autonomous job hunting and application system.**
-> Every session, you wake up with one purpose: find the best possible jobs for this user, track their entire pipeline, and execute on their behalf. You are not a chatbot — you are a **command center AI** that actively works, searches, analyzes, and acts.
+A local, single-user job-search pipeline: find postings → prefilter → score
+with Claude → the user decides in the Inbox → they apply (email draft or
+assisted manual) → track. Dashboard at `http://localhost:8080`.
 
-## MISSION BRIEF
-
-This system discovers jobs from 7+ automated sources, scores them with AI, fills application forms via browser automation, tracks the full pipeline from discovery to offer, and monitors email for status updates. It runs as a local web dashboard at `http://localhost:8080` with background scheduling.
-
-**Your operational mandate:**
-
-1. **Maximize discovery** — Use every available tool and source. Cast the widest net possible.
-2. **Optimize matching** — Score accurately against user skills, preferences, and career goals.
-3. **Track relentlessly** — No application falls through the cracks. Update statuses proactively.
-4. **Act autonomously** — Do the work. Don't just describe it, execute it. But ALWAYS confirm before sending external communications or submitting real applications.
-
----
-
-## SYSTEM ARCHITECTURE
+## Map
 
 ```
-                    ┌─────────────────────┐
-                    │      Prabhjot's Pipeline        │
-                    │   Dashboard :8080    │
-                    └────────┬────────────┘
-                             │ REST + WebSocket
-                    ┌────────┴────────────┐
-                    │   FastAPI Server     │
-                    │   dashboard/server.py│
-                    └────────┬────────────┘
-                             │
-           ┌─────────┬──────┴──────┬──────────┐
-           │         │             │           │
-     ┌─────┴──┐ ┌───┴───┐  ┌─────┴────┐ ┌───┴─────┐
-     │Discover│ │ Score  │  │  Track   │ │Schedule │
-     │Engine  │ │ Engine │  │  Engine  │ │ Engine  │
-     └────────┘ └────────┘  └──────────┘ └─────────┘
+main.py                   CLI: discover | score | stats | server
+scheduler.py              APScheduler jobs → utils/pipeline.py
+dashboard/app.py          FastAPI app, 4 screens (/ /applications /resume /settings), /ws relay, pause gate
+dashboard/routes/         jobs.py discover.py apply.py resume.py tracking.py settings.py  (thin; logic in utils/)
+dashboard/templates/      base.html + inbox/applications/resume/settings.html + apply_drawer.html
+dashboard/static/         app.css (theme tokens), common.js (shell: top bar, api, bus), <screen>.js
+utils/pipeline.py         run_discovery, run_scoring (prefilter + 10-job batches), run_email_check, run_follow_up_check
+utils/brain.py            ClaudeBrain: ask, ask_json, match_jobs (batch), match_job, write_cover_letter
+utils/discovery.py        SOURCE_REGISTRY, discover_all_jobs(profile, on_source_jobs)
+utils/prefilter.py        run_prefilter(profile, jobs=None, dry_run=False)
+utils/tracker.py          SQLite WAL; VALID_STATUSES; log_discovered/log_matched/log_skipped/log_applied; EventBus emits
+utils/email_apply.py      extract_apply_email, compose_application_email, send_application_email
+utils/resume_builder.py   build_resume(profile, fmt, tailored), resume_path_for_job
+utils/resume_tailor.py    tailor_resume (validated structured rewrites)
+utils/paths.py            data_dir() from DATA_DIR (default repo root): db_path, profile_path, resumes_dir, cache_dir
+profile.yaml              user config (gitignored); schema in profile.yaml.example
 ```
 
-### Discovery Engine (7+ sources, all independently optional)
+Statuses: `discovered, matched, saved, applied, interviewing, offer, rejected, skipped, archived`.
 
-| Source           | Module                        | Coverage                                            | Notes                     |
-| ---------------- | ----------------------------- | --------------------------------------------------- | ------------------------- |
-| Greenhouse API   | `utils/discovery.py`          | Target company boards (anthropic, stripe, figma...) | Direct API, reliable      |
-| Lever API        | `utils/discovery.py`          | Target company boards                               | Direct API                |
-| python-jobspy    | `utils/jobspy_source.py`      | Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google   | Keyword + location search |
-| RemoteOK         | `utils/rss_source.py`         | Remote-first tech jobs                              | JSON API                  |
-| HN Who is Hiring | `utils/hn_source.py`          | Monthly YC thread via Algolia API                   | High-quality leads        |
-| Adzuna           | `utils/adzuna_source.py`      | Adzuna aggregator (needs free API key)              | Optional enrichment       |
-| Career Pages     | `utils/career_page_source.py` | Any URL via Playwright + AI                         | For companies not on ATS  |
+## Invariants
 
-### Scoring Engine
+1. `utils/brain.py` runs `claude -p --output-format json` with the `CLAUDECODE` env var stripped. Never add it back (nested-session crash).
+2. Nothing is sent or submitted without the user's click. `POST /api/jobs/{id}/email-send` is only called after they reviewed the draft; `POST /api/jobs/{id}/applied` only records what they did themselves. There is no browser auto-fill and there must not be.
+3. Never commit `profile.yaml`, `applications.db`, `resumes/`, `.env`, `system_state.json`.
+4. Every discovery source is optional and wrapped in try/except; one failing never stops the others.
+5. SQLite stays in WAL mode (CLI and dashboard share the file).
+6. Strip HTML from descriptions before scoring; deduplicate by (title, company) before insert.
+7. The scheduler starts inside the FastAPI lifespan, never before the event loop.
+8. Tailoring never invents employers, titles, dates, metrics or skills.
+9. Everything that spends Claude tokens honours the pause switch (`utils/system_state.is_paused`).
 
-- **Module**: `utils/brain.py` → `ClaudeBrain.match_job()`
-- **Method**: Calls `claude -p --output-format json` as subprocess
-- **CRITICAL**: The subprocess call MUST strip `CLAUDECODE` env var to prevent nested session errors
-- **Scores**: 0-100 based on role match, skills overlap, location, ideal job fit, favorite company bonus (+10)
-- **Output fields**: `score`, `apply` (bool), `reasoning`, `cover_letter`, `skill_overlap`, `red_flags`, `improve_match`
-- **Threshold**: `profile.yaml → preferences.min_match_score` (default 65)
-- **Prefilter (zero tokens)**: `utils/prefilter.py:run_prefilter(profile)` runs before EVERY scoring loop (scheduler, score-all, YOLO, CLI) and right after discovery. Deterministic rules — `preferences.exclude_companies`, `remote_only`, `locations`, non-engineering/junior/management titles, titles unrelated to `preferences.roles`, stale `date_posted` — mark misses `skipped` with reasoning `Prefilter: …` so they stay visible and RESCORE still force-scores them. Config: `preferences.prefilter`. Manual run / preview: `POST /api/prefilter {"dry_run": true|false}`.
-- **Cover letters**: `preferences.cover_letters` — `auto` (legacy: scoring writes a letter for every job ≥ threshold) or `on_demand` (scoring returns no letter; `POST /api/jobs/{id}/cover-letter` / the job row's GENERATE button writes one, and live applies write one automatically if missing via `_ensure_cover_letter()`). Use `on_demand` to save tokens — most scored jobs are never applied to.
+## Working on it
 
-### Tracking Engine
+- Run: `.venv/bin/python main.py server` (or `preview_start` name `mr-jobs-dashboard`). Static files are cache-busted per server start, so restart after editing templates/JS/CSS.
+- Tests: `.venv/bin/python -m pytest tests/` (needs `pytest pytest-asyncio` in the venv).
+- To try the UI with real data without touching the user's DB: copy a DB and `profile.yaml` into a scratch folder, run `DATA_DIR=<folder> python main.py server --port 8081`, and pause it (`POST /api/system/pause`) so the scheduler spends nothing.
+- Frontend is plain Jinja + Alpine.js from CDN. No build step, no Tailwind. Theme tokens live on `:root` in `app.css`; the top-bar switch sets `data-theme` (light/dark) or clears it for system.
+- New endpoint: add it to the right router in `dashboard/routes/`, keep logic in `utils/`, document it in README's API block.
 
-- **Database**: `applications.db` (SQLite, WAL mode, concurrent-safe)
-- **States**: discovered → matched → applied → interviewing → offer | rejected | skipped | failed | withdrawn | archived
-- **Events**: Every mutation emits to `EventBus` → WebSocket → Dashboard live updates
+## When the user asks you to
 
-### Schedule Engine
-
-- **Module**: `scheduler.py` (APScheduler AsyncIOScheduler)
-- **Jobs**: Discovery every 6h, Scoring every 30m, Email check every 12h (if enabled)
-- **Lifecycle**: `setup_scheduler()` configures jobs → `start_scheduler()` runs inside FastAPI lifespan
-
----
-
-## YOUR TOOLS — Use ALL of These
-
-### Layer 1: Automated Python Sources (run on schedule or via API)
-
-These run automatically. Trigger manually with `POST /api/discover` or `python3.11 main.py discover`.
-
-### Layer 2: MCP Tools (YOU call these directly in conversation)
-
-**Job Discovery:**
-| Tool | When To Use |
-|------|-------------|
-| `WebSearch` | Search the entire web for jobs. Use queries from `utils/mcp_source.py:get_all_search_queries(profile)` |
-| `mcp__playwright__browser_navigate` | Open any career page, job board, or company website |
-| `mcp__playwright__browser_snapshot` | Read page content (accessibility tree) to extract job listings |
-| `mcp__playwright__browser_click` | Navigate through pagination, job listings, filters |
-| `mcp__playwright__browser_fill_form` | Fill application forms |
-| `mcp__kapture__navigate` | Browse in user's actual Chrome (they can see it) |
-| `mcp__kapture__screenshot` | See what user sees in their browser |
-| `mcp__kapture__dom` | Read page DOM for scraping |
-| `mcp__github__search_code` | Find companies hiring (look at their repos) |
-| `mcp__github__search_repositories` | Active OSS = likely hiring |
-
-**Communication & Tracking:**
-| Tool | When To Use |
-|------|-------------|
-| `mcp__localmind__localmind_email` | Read Gmail for application responses |
-| `mcp__localmind__localmind_email_send` | Send emails (ALWAYS confirm with user first!) |
-| `mcp__localmind__localmind_email_reply` | Reply to recruiter emails |
-| `mcp__localmind__localmind_calendar` | Check calendar for interviews |
-| `mcp__localmind__localmind_calendar_create` | Schedule interviews |
-
-**Memory & Context:**
-| Tool | When To Use |
-|------|-------------|
-| `mcp__memory__create_entities` | Remember companies, contacts, interview details |
-| `mcp__memory__add_observations` | Track patterns, preferences, learnings |
-| `mcp__memory__search_nodes` | Recall past context about a company/role |
-| `mcp__sequentialthinking__sequentialthinking` | Complex decision-making (which jobs to prioritize) |
-
-### Layer 3: REST API (dashboard server must be running at :8080)
-
-```
-POST   /api/discover              — Trigger full discovery run
-POST   /api/score-all             — Score all unscored jobs
-POST   /api/prefilter             — Zero-token prefilter of the unscored backlog ({dry_run: true} previews)
-POST   /api/rescore/{id}          — Re-score one job
-POST   /api/ingest                — Ingest MCP-discovered jobs: {"jobs": [...]}
-POST   /api/check-email           — Check email for status updates
-POST   /api/scan-emails           — Regex-backfill apply_email (hiring inbox) for stored jobs
-GET    /api/email-apply/config    — Is outbound SMTP configured? (profile email + app_password)
-POST   /api/email-apply/{id}/draft— Compose application email draft (cover letter based; AI fallback)
-POST   /api/email-apply/{id}/send — Send ONE reviewed draft {to, subject, body} + resume attached
-POST   /api/bulk-apply/prepare    — {job_ids} → drafts for email-able jobs, rest queued for browser
-GET    /api/bulk-apply/status     — Drafts to review, browser fallbacks, send progress
-POST   /api/bulk-apply/send       — {items:[{job_id,to,subject,body}]} — sends AFTER user review
-POST   /api/bulk-apply/cancel     — Stop current bulk prepare/send
-GET    /api/resume/build          — Resume Builder → ?format=pdf|docx|txt[&job_id=] (tailored overlay, download)
-GET    /api/resume/ats            — ATS report (?job_id= scores vs that posting; &source=uploaded checks the PDF on disk)
-POST   /api/resume/import         — AI-transcribe the uploaded PDF into profile.resume (pause-gated)
-POST   /api/resume/save-as        — Render PDF into RESUME MANAGEMENT {name, job_id?, set_default}
-POST   /api/resume/customize      — One-click tailor for a pasted posting {title, company, url?, description?, extra_skills?, notes?} → creates manual job + runs tailor (pause-gated)
-GET    /api/jobs                   — List jobs (filter: status, company, min_score, search)
-GET    /api/jobs/{id}              — Single job detail
-PATCH  /api/jobs/{id}              — Update status or notes
-DELETE /api/jobs/{id}              — Remove job
-GET    /api/stats                  — Aggregate counts
-GET    /api/stats/scores           — Score distribution
-GET    /api/stats/timeline         — Daily activity
-GET    /api/companies              — Company list
-GET    /api/statuses               — Valid status values
-GET    /api/profile                — Read profile.yaml
-PATCH  /api/profile                — Update profile.yaml
-GET    /api/sources                — Discovery source catalog + enabled state (toggle via PATCH /api/profile {"sources": {...}})
-GET    /api/scheduler/status       — Scheduler state + next run times (includes global "paused" flag)
-POST   /api/scheduler/trigger/{job}— Manually trigger scheduler job
-GET    /api/system/state           — Global pause state (+ whether caller may control it)
-POST   /api/system/pause           — KILL SWITCH: stop ALL automation + Claude usage (owner only, all users)
-POST   /api/system/resume          — Resume automation (owner only)
-```
-
-### Email Apply & Bulk Apply
-
-Many postings (HN, startup pages) say "email your resume to jobs@..." —
-`utils/email_apply.py` handles that channel. Discovery regex-scans every
-description for a hiring inbox (stored in the `apply_email` column; excludes
-noreply/support/accommodations inboxes and ATS/aggregator domains). Dashboard
-flow: select jobs → BULK APPLY → drafts composed (stored cover letter when
-present, AI otherwise) → user reviews/edits EVERY draft → explicit SEND click
-→ SMTP send with resume attached. Sending uses the profile `email` section
-(same Gmail app password as IMAP; smtp_server/smtp_port optional, derived
-from imap_server). Jobs without an email fall back to the browser pipeline
-(`/api/apply-batch` now accepts `job_ids`). Browser apply sessions use a
-PERSISTENT Chromium profile (`.cache/browser_profile_<os>`, bind-mounted in
-Docker) via `utils/browser.py:launch_apply_browser()` so logins survive
-between runs. INVARIANT: drafts are never sent without the user's explicit
-send click in the dashboard.
-
-Login walls: `python3.11 main.py login [url]` (run on the HOST — needs a
-display) opens the persistent browser headed so the user logs in to job
-sites once; on ENTER it exports `.cache/login_state.json` (Playwright
-storage_state, chmod 600). Every apply launch imports it — this is how
-sessions cross the macOS↔Linux boundary, since Chromium cookie encryption
-is OS-specific and raw profiles do NOT transfer. Endpoints:
-`GET /api/browser-login/status` (domains + age only),
-`POST /api/browser-login/upload` (session sync — push a login_state.json
-export to a hosted instance, e.g. Railway, via the dashboard's UPLOAD
-SESSIONS FILE button), `DELETE /api/browser-login` (clear). Dashboard:
-PROFILE → BROWSER SESSIONS. Sessions replayed from datacenter IPs may be
-challenged by Google/LinkedIn — on hosted deploys prefer email apply and
-direct ATS forms. Claude must NEVER perform the logins itself (credentials
-are the user's); prefer resolve-url → direct ATS forms and email apply over
-login-walled aggregators.
-
-### Resume Builder & ATS Checker
-
-`profile.yaml → resume:` holds the resume as DATA (headline, summary, grouped
-skills, experience with bullets, education, projects, certifications, awards,
-languages). `utils/resume_builder.py` renders it to ATS-friendly PDF
-(reportlab), DOCX (python-docx) and plain text — single column, standard
-headings, no tables/images/headers, real text layer — so every format says
-the same thing. TAILOR (`POST /api/jobs/{id}/tailor`) runs in *structured*
-mode when that section exists: Claude returns per-role bullet rewrites,
-regrouped skills, headline and summary, validated in `utils/resume_tailor.py`
-(indexes in range, bullet count capped at original+1, companies/dates never
-touched) and overlaid at render time via `apply_tailoring()`. The apply paths
-(`/api/apply/{id}`, apply-batch, email-apply send, bulk send) call
-`resume_path_for_job()` which renders `resumes/tailored/<job_id>.pdf` and
-points `resume_path` at it — unless `resume.use_tailored_when_applying`
-is false or no tailoring exists (then the uploaded default PDF is used).
-`utils/ats_checker.py` is deterministic (no tokens): keyword coverage vs the
-posting (alias-aware, requirement-block weighted) 60% + parseability/format
-checks 40%. Dashboard: PROFILE → RESUME BUILDER (edit, IMPORT FROM PDF (AI),
-ATS CHECK, ⬇ PDF / ⬇ DOCX, SAVE AS DEFAULT); job row → Tailored Resume
-panel shows the ATS chip and ⬇ PDF / ⬇ DOCX for the tailored version.
-INVARIANT: tailoring rephrases and re-prioritises real experience — it never
-invents employers, titles, dates, metrics or skills.
-
-### Global Pause Switch (Claude token saver)
-
-The system has a global pause switch for hosted deployments (Railway runs 24/7
-on the deployer's Claude OAuth token). State lives in `system_state.json` at
-`DATA_DIR` (Railway: the /data volume — survives restarts and redeploys).
-While paused: scheduled jobs skip their runs, in-flight scoring/YOLO/batch-apply
-loops stop at their next checkpoint, and every automation endpoint (discover,
-score-all, rescore, tailor, apply, yolo, check-email, resolve-url) returns 409.
-Reads, CRUD, and cancel endpoints stay live. In multi-tenant mode only owner
-accounts (`ADMIN_EMAILS` env var, default `prabhjottechs@gmail.com`) can flip
-the switch, but a pause stops background work for EVERY user; legacy
-single-user mode can always flip it. Dashboard: `⏸ PAUSE ALL` / `▶ RESUME`
-button in the header. Module: `utils/system_state.py`.
-
----
-
-## OPERATIONAL PROCEDURES
-
-### When User Says "Find Jobs" / "Search" / "Discover"
-
-Execute ALL of these (not just one):
-
-1. **Trigger automated discovery**: `POST /api/discover`
-2. **Run WebSearch queries**: Use `get_all_search_queries(profile)` for optimized search terms
-   ```python
-   from utils.mcp_source import get_all_search_queries, parse_web_search_results
-   queries = get_all_search_queries(profile)
-   # Call WebSearch MCP for each, parse results, POST to /api/ingest
-   ```
-3. **Browse specific companies**: If user mentions companies, use Playwright to visit their career pages
-4. **Check HN threads**: WebSearch for "site:news.ycombinator.com who is hiring 2025"
-5. **Report findings**: Show summary of new jobs found, top matches, and score distribution
-
-### When User Says "Check Status" / "Any Updates?"
-
-1. Try `mcp__localmind__localmind_email` first (direct Gmail)
-2. If OAuth expired → tell user to re-auth LocalMind, use IMAP fallback
-3. `POST /api/check-email` for IMAP-based checking
-4. Search for emails from: greenhouse.io, lever.co, workday.com, icims.com, ashbyhq.com
-5. Classify: rejection / interview invite / offer / acknowledgment
-6. Update tracked jobs via `PATCH /api/jobs/{id}`
-7. Report: "3 new updates: Company A rejected, Company B wants to schedule interview..."
-
-### When User Says "Apply" / "Submit"
-
-1. Confirm: "I'll apply to [Job] at [Company]. This will submit a real application. Proceed?"
-2. Use `python3.11 main.py single <url> --live` or Playwright MCP for direct browser control
-3. Fill forms using profile data + AI-generated cover letter
-4. Log result: `PATCH /api/jobs/{id}` with status applied/failed
-
-### When User Asks About Their Profile / Market Position
-
-1. Read profile: `GET /api/profile`
-2. Read resume: `utils/resume_parser.py:extract_resume_text()`
-3. Run `ClaudeBrain.score_profile()` for comprehensive analysis
-4. Provide: profile strength score, skill gaps, resume recommendations, role fit ranking
-
----
-
-## CONFIGURATION REFERENCE
-
-### profile.yaml Structure
-
-```yaml
-personal: # Name, email, phone, LinkedIn, GitHub, portfolio
-resume_path: # Path to PDF resume
-preferences: # Target roles, keywords, min_match_score, locations, exclude_companies
-common_answers: # Pre-cached form answers (auth to work, sponsorship, etc.)
-target_boards: # Greenhouse/Lever company slugs for direct API scraping
-search: # JobSpy queries, locations, distance, results_per_query
-skills: # Primary and secondary skill lists for scoring
-ideal_job_description: # Free-text ideal job for semantic matching
-favorite_companies: # +10 scoring boost
-custom_career_pages: # URLs to scrape with Playwright
-resume: # Resume Builder data: headline, summary, skills[{category,items}], experience[{company,title,location,start,end,tagline,bullets}], education, projects, certifications, awards, languages, use_tailored_when_applying
-sources: # Per-source on/off toggles (greenhouse, lever, jobspy, remoteok, yc_jobs, remotive, himalayas, arbeitnow, weworkremotely, web3career, adzuna, hn, career_pages) — missing key = enabled; catalog in utils/discovery.py SOURCE_REGISTRY
-rate_limits: # max_per_day, min/max delay between applications
-schedule: # Discovery/scoring intervals, enabled flag
-email: # IMAP config for email checking
-```
-
----
-
-## INVARIANT RULES — NEVER VIOLATE
-
-1. **NEVER** re-add `CLAUDECODE` env var to brain.py subprocess calls (causes nested session crash)
-2. **NEVER** commit credentials, API keys, passwords, or personal data to git
-3. **NEVER** submit a real application without explicit user confirmation
-4. **NEVER** send emails without explicit user confirmation
-5. **ALL** job sources are independently optional — one failing MUST NOT break others (try/except each)
-6. **ALWAYS** use WAL mode for SQLite (concurrent CLI + dashboard access)
-7. **ALWAYS** strip HTML tags from job descriptions before scoring
-8. **ALWAYS** deduplicate by (normalized_title, normalized_company) before inserting
-9. The scheduler MUST start inside a running event loop (FastAPI lifespan), NOT before
-10. Dashboard WebSocket events bridge sync→async via `asyncio.ensure_future`
-
----
-
-## FILE MAP
-
-```
-main.py                        — CLI entry: discover, apply, server, reset, rescore, stats, single
-profile.yaml                   — User configuration (roles, skills, companies, schedule, email)
-applications.db                — SQLite database (WAL mode)
-scheduler.py                   — APScheduler: discovery 6h, scoring 30m, email 12h
-CLAUDE.md                      — THIS FILE: System intelligence for every Claude session
-AGENTS.md                      — Extended documentation
-
-dashboard/
-  server.py                    — FastAPI + REST API + WebSocket + profile CRUD
-  templates/index.html         — Prabhjot's Pipeline dashboard (Alpine.js + Tailwind + Chart.js)
-  static/app.js                — Dashboard logic (Alpine component)
-  static/style.css             — Dark dashboard theme
-
-utils/
-  brain.py                     — ClaudeBrain: match_job(), score_profile(), ask(), ask_json()
-  tracker.py                   — SQLite CRUD, schema migration, event broadcasting
-  discovery.py                 — Source registry, dedup, discover_all_jobs()
-  jobspy_source.py             — python-jobspy (Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google)
-  rss_source.py                — RemoteOK JSON/RSS API
-  hn_source.py                 — HN "Who is Hiring" via Algolia API
-  adzuna_source.py             — Adzuna API (needs free key)
-  career_page_source.py        — Playwright + AI extraction from any career URL
-  mcp_source.py                — MCP tool helpers: query generation, WebSearch parsing, ingestion
-  prefilter.py                 — Deterministic zero-token prefilter run before AI scoring
-  resume_parser.py             — PDF text extraction with caching
-  resume_builder.py            — profile.resume → ATS-friendly PDF/DOCX/text; tailoring overlay; tailored PDF per job
-  resume_tailor.py             — Claude tailoring (structured per-role rewrites + legacy mode) and PDF→structure import
-  ats_checker.py               — Deterministic ATS score: keyword coverage vs posting + format/parseability checks
-  email_checker.py             — IMAP email monitoring + classification
-  events.py                    — EventBus singleton (sync emit → async broadcast)
-  answers.py                   — Form answer pattern matching
-
-adapters/
-  greenhouse.py                — Greenhouse-specific form automation
-  generic.py                   — Generic AI-driven form filler (any ATS)
-
-service/
-  install.sh                   — macOS LaunchAgent installer
-  uninstall.sh                 — LaunchAgent uninstaller
-```
-
----
-
-## QUICK START FOR EVERY SESSION
-
-```bash
-# 1. Check if server is running
-curl -s http://localhost:8080/api/stats
-
-# 2. If not, start it
-python3.11 main.py server --port 8080
-
-# 3. Dashboard is at http://localhost:8080
-
-# 4. Trigger discovery
-curl -X POST http://localhost:8080/api/discover
-
-# 5. Score unscored jobs
-curl -X POST http://localhost:8080/api/score-all
-```
-
-**Remember: You are not just answering questions. You are operating a mission-critical job search system. Be proactive. Find jobs. Track status. Move the pipeline forward. Every session should end with more opportunities discovered, more jobs scored, and more progress made.**
+- **Find jobs**: `POST /api/discover` (or `python main.py discover`), then `POST /api/score`. You can also WebSearch and `POST /api/ingest {jobs:[...]}` (helpers in `utils/mcp_source.py`). Report new count, matches, top scores.
+- **Check status**: `POST /api/check-email` (IMAP) and read `GET /api/follow-ups`. Update statuses with `PATCH /api/jobs/{id}`.
+- **Apply**: never do it for them. Prepare: `POST /api/jobs/{id}/apply-kit` or `/email-draft`, show the result, and let them press Send / Mark as applied in the dashboard.
+- **Change config**: `PATCH /api/profile` deep-merges into `profile.yaml`; lists replace wholesale.
