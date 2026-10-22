@@ -91,6 +91,17 @@ function applyDrawer() {
       this.closeApply();
     },
     afterApplied(job) { if (this.jobs) this.jobs = this.jobs.filter((j) => j.id !== job.id); if (this.load) this.load(); },
+    /* Apply with a different resume: the letter and tailoring were for the old one, so they are redone. */
+    async changeTrack(id) {
+      const job = this.apply.job;
+      if ((job.track || "main") === id) return;
+      const r = await api.patch(`/api/jobs/${job.id}`, { track: id });
+      Object.assign(job, r);
+      this.apply.kit = null; this.apply.draft = null;
+      toast(`Applying as ${trackName(this.tracks, id)}. Re-score to see how well it fits.`);
+      if (this.apply.mode === "email") await this.loadDraft(); else await this.loadKit();
+      if (TRACK && TRACK !== id && this.jobs) this.jobs = this.jobs.filter((j) => j.id !== job.id);
+    },
   };
 }
 
@@ -98,12 +109,15 @@ function inbox() {
   return {
     ...applyDrawer(),
     tab: "matched",
-    jobs: [], total: 0, counts: {}, unscored: 0, search: "", loading: true,
+    jobs: [], total: 0, counts: {}, unscored: 0, search: "", loading: true, tracks: [],
+    get multi() { return this.tracks.length > 1; },
+    trackName(id) { return trackName(this.tracks, id); },
     get subtitle() {
       if (this.tab === "matched") return this.total ? `${this.total} ${L.decide}` : "";
       return "";
     },
     async init() {
+      this.tracks = await tracksReady;
       await this.load();
       bus.on((ev) => {
         if (["scoring_complete", "job_status_changed", "job_matched"].includes(ev.type)) this.loadSoon();
@@ -116,7 +130,8 @@ function inbox() {
       const params = new URLSearchParams({ status: this.tab, sort_by: this.tab === "matched" ? "match_score" : "discovered_at",
                                            sort_order: "desc", limit: 30, offset });
       if (this.search) params.set("search", this.search);
-      const [r, stats] = await Promise.all([api.get("/api/jobs?" + params), api.get("/api/stats")]);
+      withTrack(params);
+      const [r, stats] = await Promise.all([api.get("/api/jobs?" + params), api.get("/api/stats?" + withTrack(new URLSearchParams()))]);
       this.jobs = offset ? this.jobs.concat(r.jobs) : r.jobs;
       this.total = r.total;
       this.counts = { matched: stats.matched, saved: stats.saved, skipped: stats.skipped };

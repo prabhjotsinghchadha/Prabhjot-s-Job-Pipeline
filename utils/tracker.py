@@ -94,6 +94,7 @@ def _migrate_schema(conn: sqlite3.Connection):
         "follow_up_count": "INTEGER DEFAULT 0",
         "apply_email": "TEXT DEFAULT ''",
         "kind": "TEXT DEFAULT 'job'",
+        "track": "TEXT DEFAULT ''",
     }
 
     for col, col_type in migrations.items():
@@ -145,11 +146,12 @@ def log_discovered(job) -> None:
         kind = meta.get("kind", "job") if meta.get("kind") in KINDS else "job"
         if not apply_email and meta.get("apply_email"):
             apply_email = meta["apply_email"]
+        track = str(meta.get("track") or "") if kind == "job" else ""
         conn.execute("""
             INSERT OR IGNORE INTO applications
             (id, title, company, platform, url, apply_url, location, description, source,
-             salary_min, salary_max, date_posted, metadata, apply_email, kind)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             salary_min, salary_max, date_posted, metadata, apply_email, kind, track)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             job.id, job.title, job.company, job.platform, job.url, job.apply_url,
             job.location, getattr(job, 'description', ''),
@@ -157,7 +159,7 @@ def log_discovered(job) -> None:
             job.metadata.get('salary_min') if isinstance(job.metadata, dict) else None,
             job.metadata.get('salary_max') if isinstance(job.metadata, dict) else None,
             job.metadata.get('date_posted', '') if isinstance(job.metadata, dict) else '',
-            metadata, apply_email, kind
+            metadata, apply_email, kind, track
         ))
         conn.commit()
     finally:
@@ -214,33 +216,42 @@ def log_skipped(job_id: str, reason: str) -> None:
     conn.close()
 
 
-def get_today_count(kind: str = "job") -> int:
+def _track_clause(track) -> tuple:
+    """SQL fragment + params for an optional track filter (None = every track, '' = main)."""
+    if track is None:
+        return "", ()
+    return " AND COALESCE(track, '') = ?", (track,)
+
+
+def get_today_count(kind: str = "job", track=None) -> int:
     """Applications sent (or leads contacted) today."""
+    tc, tp = _track_clause(track)
     conn = get_db()
-    row = conn.execute("""
+    row = conn.execute(f"""
         SELECT COUNT(*) as cnt FROM applications
-        WHERE kind = ? AND status IN ('applied', 'contacted') AND DATE(applied_at) = DATE('now')
-    """, (kind,)).fetchone()
+        WHERE kind = ? AND status IN ('applied', 'contacted') AND DATE(applied_at) = DATE('now'){tc}
+    """, (kind, *tp)).fetchone()
     conn.close()
     return row["cnt"]
 
 
-def get_stats(kind: str = "job") -> dict:
-    """Counts per stage for one pipeline."""
+def get_stats(kind: str = "job", track=None) -> dict:
+    """Counts per stage for one pipeline (optionally one resume track; '' = main)."""
+    tc, tp = _track_clause(track)
     conn = get_db()
     stats = {"kind": kind}
     counts = {r["status"]: r["cnt"] for r in conn.execute(
-        "SELECT status, COUNT(*) as cnt FROM applications WHERE kind = ? GROUP BY status", (kind,)
+        f"SELECT status, COUNT(*) as cnt FROM applications WHERE kind = ?{tc} GROUP BY status", (kind, *tp)
     ).fetchall()}
     for status in STAGES[kind]:
         stats[status] = counts.get(status, 0)
 
-    stats["today"] = get_today_count(kind)
+    stats["today"] = get_today_count(kind, track)
 
-    row = conn.execute("""
+    row = conn.execute(f"""
         SELECT AVG(match_score) as avg_score FROM applications
-        WHERE kind = ? AND status IN ('applied', 'contacted') AND match_score IS NOT NULL
-    """, (kind,)).fetchone()
+        WHERE kind = ? AND status IN ('applied', 'contacted') AND match_score IS NOT NULL{tc}
+    """, (kind, *tp)).fetchone()
     stats["avg_match_score"] = round(row["avg_score"] or 0, 1)
 
     conn.close()
@@ -298,8 +309,10 @@ def get_all_jobs(
     limit: int = 100,
     offset: int = 0,
     kind: str = None,
+    track: str = None,
 ) -> tuple:
-    """Get jobs with filtering, sorting, and pagination. Returns (jobs, total_count)."""
+    """Get jobs with filtering, sorting, and pagination. Returns (jobs, total_count).
+    `track` filters to one resume track ('' = main, None = all)."""
     conn = get_db()
     try:
         conditions = []
@@ -308,6 +321,9 @@ def get_all_jobs(
         if kind:
             conditions.append("kind = ?")
             params.append(kind)
+        if track is not None:
+            conditions.append("COALESCE(track, '') = ?")
+            params.append(track)
 
         if status:
             wanted = [x.strip() for x in status.split(",") if x.strip()]
@@ -382,6 +398,41 @@ def update_job_status(job_id: str, status: str) -> bool:
         conn.close()
     _emit("job_status_changed", {"id": job_id, "status": status})
     return True
+
+
+def set_job_track(job_id: str, track: str) -> bool:
+    """Move a job to another resume track. Its cover letter and tailoring were
+    written for the old resume, so they are cleared."""
+    conn = get_db()
+    cur = conn.execute(
+        "UPDATE applications SET track = ?, cover_letter = '', tailored_resume = '' WHERE id = ?",
+        (track or "", job_id))
+    conn.commit()
+    conn.close()
+    _emit("job_track_changed", {"id": job_id, "track": track or ""})
+    return cur.rowcount > 0
+
+
+def track_counts(kind: str = "job") -> dict:
+    """{track: {status: n}} for the resume-track switcher ('' = main)."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT COALESCE(track, '') AS track, status, COUNT(*) AS cnt FROM applications "
+        "WHERE kind = ? GROUP BY COALESCE(track, ''), status", (kind,)).fetchall()
+    conn.close()
+    out: dict = {}
+    for r in rows:
+        out.setdefault(r["track"], {})[r["status"]] = r["cnt"]
+    return out
+
+
+def clear_track(track: str) -> int:
+    """A track was deleted: its jobs go back to the main resume."""
+    conn = get_db()
+    cur = conn.execute("UPDATE applications SET track = '' WHERE track = ?", (track,))
+    conn.commit()
+    conn.close()
+    return cur.rowcount
 
 
 def update_job_notes(job_id: str, notes: str) -> bool:

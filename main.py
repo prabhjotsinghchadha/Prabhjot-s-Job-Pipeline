@@ -30,9 +30,9 @@ def require_profile() -> dict:
     return profile
 
 
-async def cmd_discover(profile: dict):
+async def cmd_discover(profile: dict, tracks: list = None):
     print("Finding jobs...")
-    r = await pipeline.run_discovery(profile)
+    r = await pipeline.run_discovery(profile, tracks or None)
     print(f"Discovery: {r}")
     print("Scoring...")
     r = await pipeline.run_scoring(profile)
@@ -49,7 +49,9 @@ async def cmd_score(profile: dict):
 def main():
     parser = argparse.ArgumentParser(description="Job pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("discover", help="Find new jobs from every enabled source, then score them")
+    disc = sub.add_parser("discover", help="Find new jobs from every enabled source, then score them")
+    disc.add_argument("--track", action="append", default=[],
+                      help="Resume track id to search for (repeatable; default: every track)")
     sub.add_parser("score", help="Score the unscored backlog")
     sub.add_parser("stats", help="Show pipeline counts")
     srv = sub.add_parser("server", help="Run the dashboard + scheduler")
@@ -63,7 +65,7 @@ def main():
         from dashboard.app import run_server
         run_server(host=args.host, port=args.port)
     elif args.command == "discover":
-        asyncio.run(cmd_discover(require_profile()))
+        asyncio.run(cmd_discover(require_profile(), args.track))
     elif args.command == "score":
         asyncio.run(cmd_score(require_profile()))
 

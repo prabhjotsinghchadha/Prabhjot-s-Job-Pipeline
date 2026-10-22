@@ -11,8 +11,9 @@ router = APIRouter(tags=["discover"])
 
 
 @router.post("/discover")
-async def discover(kind: str = "job") -> dict:
-    """kind=job: run every enabled source. kind=lead: gigs + prospects. Returns at once."""
+async def discover(body: dict = {}, kind: str = "job") -> dict:
+    """kind=job: run every enabled source for {tracks?: [ids]} (default: every resume track).
+    kind=lead: gigs + prospects. Returns at once."""
     profile = load_profile()
     kind = valid_kind(kind)
     if kind == "lead":
@@ -24,8 +25,10 @@ async def discover(kind: str = "job") -> dict:
         return {"status": "started", "kind": "lead"}
     if pipeline.is_running("discover"):
         return {"status": "already_running"}
-    asyncio.create_task(pipeline.run_discovery(profile))
-    return {"status": "started", "kind": "job"}
+    from utils.tracks import selected
+    tracks = selected(profile, body.get("tracks") or None)
+    asyncio.create_task(pipeline.run_discovery(profile, tracks))
+    return {"status": "started", "kind": "job", "tracks": tracks}
 
 
 @router.post("/score")
@@ -84,7 +87,7 @@ async def ingest(body: dict) -> dict:
 
 @router.post("/jobs/manual")
 async def add_manual_job(body: dict) -> dict:
-    """Paste a posting by hand: {title, company, url?, description}. Optionally fetches the URL for text."""
+    """Paste a posting by hand: {title, company, url?, description, track?}. Optionally fetches the URL for text."""
     import hashlib
     import re
     from utils.mcp_source import ingest_jobs
@@ -110,7 +113,7 @@ async def add_manual_job(body: dict) -> dict:
     job_id = "manual_" + hashlib.md5(f"{title.lower()}|{company.lower()}|{url.lower()}".encode()).hexdigest()[:16]
     ingest_jobs([{"id": job_id, "title": title, "company": company, "url": url, "apply_url": url,
                   "location": body.get("location") or "", "description": description,
-                  "platform": "manual", "source": "manual"}])
+                  "platform": "manual", "source": "manual", "track": body.get("track") or ""}])
     conn = get_db()
     conn.execute("UPDATE applications SET description = ?, tailored_resume = '' WHERE id = ?", (description, job_id))
     conn.commit()

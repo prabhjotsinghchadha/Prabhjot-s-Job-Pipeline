@@ -27,6 +27,11 @@
       <div class="topbar-actions">
         <span class="small muted" x-cloak x-show="progress" x-text="progress"></span>
         <span class="small muted" x-cloak x-show="!progress && unscored" x-text="unscored + ' ' + L.unscored"></span>
+        <select class="theme-select" x-cloak x-show="mode==='job' && tracks.length > 1" :value="track" @change="setTrack($event.target.value)"
+                title="Which resume you are applying with. Find jobs searches for it; the Inbox and Applications show its jobs.">
+          <option value="">All resumes</option>
+          <template x-for="t in tracks" :key="t.id"><option :value="t.id" x-text="'As ' + t.name" :selected="t.id === track"></option></template>
+        </select>
         <button class="btn sm" @click="findJobs()" :disabled="busyDiscover || paused">
           <span class="spin" x-show="busyDiscover" x-cloak></span> <span x-text="L.find">Find jobs</span>
         </button>

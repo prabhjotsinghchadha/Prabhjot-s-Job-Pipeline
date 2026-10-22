@@ -101,7 +101,7 @@ def ingest_jobs(job_dicts: list) -> dict:
 
     Args:
         job_dicts: List of dicts with keys: id, title, company, location, url,
-                   apply_url, platform, description, source
+                   apply_url, platform, description, source, track (resume track id, optional)
 
     Returns:
         {"ingested": N, "skipped": N, "total": N}
@@ -125,8 +125,8 @@ def ingest_jobs(job_dicts: list) -> dict:
         try:
             conn.execute("""
                 INSERT OR IGNORE INTO applications
-                (id, title, company, platform, url, apply_url, location, description, source, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, title, company, platform, url, apply_url, location, description, source, metadata, track)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 job_id,
                 job.get("title", ""),
@@ -138,6 +138,7 @@ def ingest_jobs(job_dicts: list) -> dict:
                 job.get("description", ""),
                 job.get("source", "mcp"),
                 _json.dumps({"source": "mcp_discovery"}),
+                "" if job.get("track") in (None, "", "main") else str(job["track"]),
             ))
             ingested += 1
         except Exception:

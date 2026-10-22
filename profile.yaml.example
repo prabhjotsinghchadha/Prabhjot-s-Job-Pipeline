@@ -138,3 +138,18 @@ resume:
   awards: []
   languages: []
   use_tailored_when_applying: true
+
+# More resumes, aimed at other roles (the Resume screen's "+ New resume" writes
+# these). Everything above is the main resume; each track overrides only what
+# it sets. Find jobs searches every track's roles and tags each job with the
+# track it fits; it is then scored, tailored and applied with that resume.
+main_track_name: Senior Software Engineer
+tracks: []
+#  - id: cto
+#    name: CTO
+#    roles: [CTO, VP Engineering, Head of Engineering]
+#    search_queries: [CTO, VP of Engineering]   # optional, defaults to roles
+#    ideal_job_description: Technical co-founder or first CTO at a seed-to-Series-B startup.
+#    min_match_score: 70                        # optional
+#    resume_path: ./resumes/CTO_cv.pdf          # optional; else its builder content is attached
+#    resume: {headline: CTO, summary: ..., experience: [...]}   # optional; else the main resume

@@ -24,12 +24,32 @@ sent or submitted without you pressing the button, in either mode.
 |---|---|
 | **Inbox / Leads** (`/`) | Scored jobs (or leads) above your threshold, best first. Apply (or Pitch), Save for later, or Skip. |
 | **Applications / Pipeline** (`/applications`) | Everything you applied to (or pitched), by stage. Follow-up reminders, ghost alerts, notes. |
-| **Resume** (`/resume`) | Structured resume builder → ATS-friendly PDF/DOCX. Per-job tailoring. ATS check. |
+| **Resume** (`/resume`) | One or more resumes (e.g. Senior SWE and CTO), each with its target roles. Structured builder → ATS-friendly PDF/DOCX. Per-job tailoring. ATS check. |
 | **Settings** (`/settings`) | Who you are, what you want, where to look, schedule, email. Edits `profile.yaml`. |
 
 The top bar has the two actions that matter (**Find jobs**, **Score**), a
 theme switch (system / light / dark) and a **Pause** switch that stops all
-automation and Claude usage.
+automation and Claude usage. With more than one resume it also has an
+**As …** picker (see below).
+
+### Several resumes
+
+Applying for different kinds of role (say Senior Software Engineer *and* CTO)?
+On the Resume screen press **+ New resume**. Each resume has its own name,
+target roles, optional search queries / keywords / ideal-job paragraph /
+minimum score, its own builder content and its own PDF. Anything it leaves
+empty is borrowed from the main resume (the top-level profile).
+
+- **Find jobs** searches for every resume at once, or only the one chosen in
+  the top-bar **As …** picker. Each new job is matched to the resume whose
+  roles fit its title best (a "Head of Engineering" posting goes to CTO, a
+  "Senior Backend Engineer" one to the IC resume).
+- Each job is prefiltered and scored against **its** resume: the CTO resume
+  keeps director/VP titles that the IC one drops.
+- The Inbox and Applications show the picked resume's jobs (or all, with a
+  chip naming the resume). The Apply drawer says which resume you are applying
+  as, and you can switch it there; the cover letter, tailoring and attached
+  PDF follow.
 
 ### Applying
 
@@ -90,6 +110,7 @@ repo. Put `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or
 
 ```bash
 python main.py discover    # find new jobs from every enabled source, then score
+python main.py discover --track cto   # only for one resume track (repeatable)
 python main.py score       # score the unscored backlog
 python main.py stats       # counts per stage
 python main.py server      # dashboard + scheduler
@@ -102,7 +123,7 @@ main.py              CLI
 scheduler.py         APScheduler: discover / score / email / follow-ups on intervals
 dashboard/
   app.py             FastAPI app, 4 screens, WebSocket relay, pause switch
-  routes/            jobs, discover, apply, resume, tracking, settings
+  routes/            jobs, discover, apply, resume, tracks, tracking, settings
   templates/         base + one HTML file per screen (Jinja + Alpine.js, no build step)
   static/            app.css (theme), common.js (top bar, API, WebSocket), one JS per screen
 utils/
@@ -110,6 +131,7 @@ utils/
   leads.py           clients mode: contract classifier, gig sources, prospects from the jobs DB
   discovery.py       source registry + Greenhouse/Lever; other sources in *_source.py
   prefilter.py       zero-token rules (remote, location, seniority, title, age)
+  tracks.py          several resumes: profile_for_track overlay, job → track assignment
   brain.py           Claude CLI calls: match_jobs (batch), match_job, write_cover_letter
   tracker.py         SQLite (WAL) CRUD + EventBus emits
   email_apply.py     hiring-inbox detection, draft composition, SMTP send
@@ -149,18 +171,19 @@ All under `/api`. Every list, stats and action endpoint takes `kind=job|lead`
 (default job); the dashboard adds it from the current mode.
 
 ```
-GET   /jobs?status=matched,saved&min_score=&search=&sort_by=&limit=&offset=
-GET   /jobs/{id}        PATCH /jobs/{id} {status|notes}        DELETE /jobs/{id}
+GET   /jobs?status=matched,saved&min_score=&search=&sort_by=&limit=&offset=&track=
+GET   /jobs/{id}        PATCH /jobs/{id} {status|notes|track}  DELETE /jobs/{id}
 POST  /jobs/{id}/skip   POST /jobs/{id}/save   POST /jobs/{id}/score   POST /jobs/manual
-POST  /discover         POST /score            POST /prefilter {dry_run}   GET /sources   POST /ingest {jobs}
+POST  /discover {tracks?}   POST /score            POST /prefilter {dry_run}   GET /sources   POST /ingest {jobs}
 POST  /jobs/{id}/apply-kit   POST /jobs/{id}/applied   POST /jobs/{id}/cover-letter   POST /jobs/{id}/resolve-url
 POST  /jobs/{id}/email-draft POST /jobs/{id}/email-send {to,subject,body}   GET /email/config   POST /email/test
 POST  /jobs/{id}/pitch {force?}   POST /jobs/{id}/contacted {channel,note}     (leads; apply-kit returns the outreach kit)
-GET   /resume/build?format=pdf|docx|txt[&job_id=]   GET /resume/ats[?job_id=]   POST /resume/import   POST /resume/save-as
+GET   /resume/build?format=pdf|docx|txt[&job_id=|&track=]   GET /resume/ats[?job_id=|track=]   POST /resume/import {track?}   POST /resume/save-as {track?}
 GET   /jobs/{id}/tailor      POST /jobs/{id}/tailor   GET /resume/tailored   GET|POST /resumes   DELETE /resumes/{name}
+GET   /tracks           POST /tracks {name,copy_from?}   PATCH /tracks/{id} {name,roles,…,resume,resume_file}   DELETE /tracks/{id}
 GET   /follow-ups       POST /jobs/{id}/follow-up   POST /jobs/{id}/dismiss-follow-up   POST /check-email
 GET   /profile          PATCH /profile (deep merge)   GET /scheduler/status   POST /scheduler/trigger/{job}
-GET   /system/state     POST /system/pause   POST /system/resume   GET /system/claude   GET /stats
+GET   /system/state     POST /system/pause   POST /system/resume   GET /system/claude   GET /stats[?track=]
 ```
 
 Live updates arrive on `ws://localhost:8080/ws` as `{type, data}` events.

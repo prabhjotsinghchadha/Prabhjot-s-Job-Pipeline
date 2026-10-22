@@ -20,6 +20,21 @@ def save_profile(profile: dict) -> None:
         yaml.dump(profile, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
 
+def job_profile(job: dict) -> dict:
+    """The profile to apply/tailor with: the job's resume track over the main profile."""
+    from utils.tracks import profile_for_job
+    profile = load_profile()
+    return profile if (job or {}).get("kind") == "lead" else profile_for_job(profile, job)
+
+
+def track_filter(track):
+    """Query value → tracker filter: None/'all' = every track, 'main'/'' = main, else the id."""
+    if track is None or track == "all":
+        return None
+    from utils.tracks import norm_id
+    return norm_id(track)
+
+
 def require_job(job_id: str) -> dict:
     job = get_job_by_id(job_id)
     if not job:

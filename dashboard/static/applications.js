@@ -19,11 +19,12 @@ function applications() {
     stages: Object.keys(LABELS),
     tab: M.first,
     first: M.first,
-    groups: {}, total: 0, loading: true, checking: false,
+    groups: {}, total: 0, loading: true, checking: false, tracks: [],
     followUps: { overdue: [], ghosts: [] },
     label: (s) => LABELS[s] || s,
     nextStages: (s) => NEXT[s] || [],
     async init() {
+      this.tracks = await tracksReady;
       await this.load();
       bus.on((ev) => { if (["job_status_changed", "job_applied", "email_check_complete", "email_sent"].includes(ev.type)) this.loadSoon(); });
     },
@@ -31,7 +32,8 @@ function applications() {
     loadSoon() { clearTimeout(this._t); this._t = setTimeout(() => this.load(), 800); },
     async load() {
       const [r, fu] = await Promise.all([
-        api.get(`/api/jobs?status=${Object.keys(LABELS).join(",")}&sort_by=applied_at&sort_order=desc&limit=300`),
+        api.get("/api/jobs?" + withTrack(new URLSearchParams({ status: Object.keys(LABELS).join(","), sort_by: "applied_at",
+                                                                sort_order: "desc", limit: 300 }))),
         api.get("/api/follow-ups"),
       ]);
       const groups = {};

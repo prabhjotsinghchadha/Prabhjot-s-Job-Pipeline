@@ -3,6 +3,7 @@
 <div x-data="inbox()" x-init="init()">
   <div class="page-head">
     <h1 x-text="L.inbox">Inbox</h1>
+    <span class="chip accent" x-show="multi && TRACK" x-cloak x-text="'as ' + trackName(TRACK)" title="Change it in the top bar"></span>
     <span class="muted" x-text="subtitle"></span>
     <span class="spacer"></span>
     <input type="text" placeholder="Search title, company…" x-model="search" @input.debounce.300ms="load()" style="max-width:240px">
@@ -40,6 +41,7 @@
             <span x-show="!job.date_posted"> · found <span x-text="fmt.date(job.discovered_at)"></span></span>
             <span x-show="job.source"> · <span x-text="job.source"></span></span>
             <span class="chip" x-show="job.lead_type" x-text="job.lead_type"></span>
+            <span class="chip accent" x-show="multi && !TRACK && job.kind !== 'lead'" x-text="trackName(job.track)" title="Resume this job is scored against"></span>
             <span class="chip" x-show="job.engagement && job.engagement !== 'unclear'" x-text="job.engagement"></span>
             <span class="chip" :class="job.budget_fit === 'ok' ? 'good' : 'weak'" x-show="job.budget_fit && job.budget_fit !== 'unknown'" x-text="'budget ' + job.budget_fit"></span>
             <span class="chip accent" x-show="job.apply_email" title="Has an email address">email</span>

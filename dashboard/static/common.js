@@ -17,6 +17,21 @@ function setMode(m) {
   location.reload();
 }
 
+/* Resume track (Jobs mode): "" = all resumes, else a track id such as "main" or "cto".
+   It decides what Find jobs searches for and which jobs the Inbox and Applications show. */
+const TRACK = (() => { try { return MODE === "job" ? localStorage.getItem("track") || "" : ""; } catch (_) { return ""; } })();
+function setTrack(t) {
+  try { localStorage.setItem("track", t || ""); } catch (_) {}
+  location.reload();
+}
+/* Loaded once per page; every screen awaits the same promise. */
+const tracksReady = MODE === "job"
+  ? fetch("/api/tracks").then((r) => (r.ok ? r.json() : [])).catch(() => [])
+  : Promise.resolve([]);
+const trackName = (tracks, id) => (tracks.find((t) => t.id === (id || "main")) || {}).name || id || "Main";
+/* Adds track=… to a query string when one resume is selected. */
+function withTrack(params) { if (TRACK) params.set("track", TRACK); return params; }
+
 const api = {
   async call(method, path, body, opts = {}) {
     if (path.startsWith("/api/") && !/[?&]kind=/.test(path)) path += (path.includes("?") ? "&" : "?") + "kind=" + MODE;
@@ -109,8 +124,13 @@ function shell() {
       if (t === "system") delete document.documentElement.dataset.theme;
       else document.documentElement.dataset.theme = t;
     },
+    tracks: [],
+    track: TRACK,
+    setTrack,
     async init() {
       try { const t = localStorage.getItem("theme"); if (this.THEMES.includes(t)) this.theme = t; } catch (_) {}
+      this.tracks = await tracksReady;
+      if (TRACK && !this.tracks.some((t) => t.id === TRACK)) setTrack("");  // deleted since
       await this.refresh();
       setInterval(() => this.refresh(), 20000);
       bus.on((ev) => this.onEvent(ev));
@@ -120,7 +140,7 @@ function shell() {
     async refresh() {
       try {
         const [stats, sched, state] = await Promise.all([
-          api.get("/api/stats", { quiet: true }), api.get("/api/scheduler/status", { quiet: true }),
+          api.get("/api/stats?" + withTrack(new URLSearchParams()), { quiet: true }), api.get("/api/scheduler/status", { quiet: true }),
           api.get("/api/system/state", { quiet: true }),
         ]);
         this.stats = stats; this.sched = sched; this.paused = state.paused;
@@ -133,9 +153,15 @@ function shell() {
       const t = ev.type, d = ev.data || {};
       if (d.kind && d.kind !== MODE && /^(discovery|scoring)_/.test(t)) return;  // other pipeline's progress
       const what = MODE === "lead" ? "leads" : "jobs";
-      if (t === "discovery_started") { this.busyDiscover = true; this.progress = `Finding ${what}…`; }
+      const forWhom = d.tracks && this.tracks.length > 1 ? ` for ${d.tracks.join(" + ")}` : "";
+      if (t === "discovery_started") { this.busyDiscover = true; this.progress = `Finding ${what}${forWhom}…`; }
       if (t === "discovery_progress") this.progress = `Finding ${what}… ${d.source}: ${d.new} new`;
-      if (t === "discovery_complete") { this.busyDiscover = false; this.progress = null; toast(`Found ${d.new} new ${what} (${d.prefiltered} filtered out)`); this.refresh(); }
+      if (t === "discovery_complete") {
+        this.busyDiscover = false; this.progress = null;
+        const split = Object.entries(d.new_by_track || {});
+        const by = split.length > 1 ? ": " + split.map(([n, c]) => `${c} ${n}`).join(", ") : "";
+        toast(`Found ${d.new} new ${what}${by} (${d.prefiltered} filtered out)`); this.refresh();
+      }
       if (t === "discovery_error") { this.busyDiscover = false; this.progress = null; toast(`Finding ${what} failed: ` + d.error, "error"); }
       if (t === "scoring_started") { this.busyScore = true; this.progress = `Scoring 0 / ${d.total}`; }
       if (t === "scoring_progress") this.progress = `Scoring ${d.scored} / ${d.total} (${d.matched} matches)`;
@@ -148,7 +174,7 @@ function shell() {
     _rt: null,
     refreshSoon() { clearTimeout(this._rt); this._rt = setTimeout(() => this.refresh(), 800); },
     async findJobs() {
-      const r = await api.post("/api/discover");
+      const r = await api.post("/api/discover", MODE === "job" && TRACK ? { tracks: [TRACK] } : {});
       if (r.status === "already_running") toast("Already running");
       else { this.busyDiscover = true; this.progress = L.find + "…"; }
     },

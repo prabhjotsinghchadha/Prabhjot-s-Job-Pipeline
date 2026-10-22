@@ -46,17 +46,25 @@ def _now() -> str:
 # Discovery
 # --------------------------------------------------------------------------
 
-async def run_discovery(profile: dict) -> dict:
-    """Run every enabled source, save jobs as each source finishes, prefilter."""
+async def run_discovery(profile: dict, tracks: Optional[list] = None) -> dict:
+    """
+    Run every enabled source, save jobs as each source finishes, prefilter.
+    `tracks` picks which resume tracks to search for (None = all). The sources
+    run once with every selected track's roles; each new job is tagged with
+    the track it fits best.
+    """
     if _running["discover"]:
         return {"status": "already_running"}
     _running["discover"] = True
     from utils.discovery import discover_all_jobs
     from utils.prefilter import run_prefilter
     from utils.tracker import is_already_seen, log_discovered
+    from utils.tracks import assign_track, discovery_profile, get_track, selected
 
     seen: set = set()
     counts = {"total": 0, "new": 0}
+    ids = selected(profile, tracks)
+    per_track: dict = {}
 
     async def on_source_jobs(source: str, jobs: list) -> None:
         new_here = 0
@@ -67,17 +75,24 @@ async def run_discovery(profile: dict) -> dict:
             seen.add(key)
             counts["total"] += 1
             if not is_already_seen(job.id):
+                if not isinstance(job.metadata, dict):
+                    job.metadata = {}
+                job.metadata["track"] = assign_track(job, profile, ids)
                 log_discovered(job)
                 new_here += 1
                 counts["new"] += 1
+                per_track[job.metadata["track"]] = per_track.get(job.metadata["track"], 0) + 1
         EventBus.emit("discovery_progress",
                       {"source": source, "found": len(jobs), "new": new_here, "total_new": counts["new"]})
 
+    names = [(get_track(profile, i) or {}).get("name", i) for i in ids]
     try:
-        EventBus.emit("discovery_started", {"kind": "job"})
-        await discover_all_jobs(profile, on_source_jobs=on_source_jobs)
+        EventBus.emit("discovery_started", {"kind": "job", "tracks": names})
+        await discover_all_jobs(discovery_profile(profile, ids), on_source_jobs=on_source_jobs)
         pf = await asyncio.to_thread(run_prefilter, profile)
-        result = {"total": counts["total"], "new": counts["new"],
+        result = {"total": counts["total"], "new": counts["new"], "tracks": names,
+                  "new_by_track": {(get_track(profile, t or "main") or {}).get("name", t): n
+                                   for t, n in per_track.items()},
                   "prefiltered": pf["skipped"], "kind": "job", "timestamp": _now()}
         EventBus.emit("discovery_complete", result)
         return result
@@ -127,8 +142,8 @@ async def run_scoring(profile: dict, jobs: Optional[list] = None, force: bool = 
     _running[slot] = True
     from utils.brain import ClaudeBrain
     from utils.prefilter import run_prefilter
-    from utils.resume_parser import extract_resume_text
     from utils.tracker import get_unscored_jobs, log_matched, log_skipped
+    from utils.tracks import profile_for_track, track_resume_text
 
     result: dict = {}
     try:
@@ -155,19 +170,31 @@ async def run_scoring(profile: dict, jobs: Optional[list] = None, force: bool = 
             return result
 
         brain = ClaudeBrain(verbose=False, profile=profile)
-        resume_text = extract_resume_text(profile.get("resume_path", "")) if kind == "job" else ""
-        min_score = int(profile.get("preferences", {}).get("min_match_score", 65))
-        if kind == "lead":
-            min_score = int((profile.get("offer") or {}).get("min_match_score") or min_score)
+
+        # Jobs are scored against the resume track they belong to, so batches
+        # never mix tracks. Leads have one offer and one group.
+        groups: dict = {}
+        for t in targets:
+            groups.setdefault((t.get("track") or "") if kind == "job" else "", []).append(t)
+        batches = []
+        for track, items in groups.items():
+            eff = profile_for_track(profile, track) if track else profile
+            resume_text = track_resume_text(eff) if kind == "job" else ""
+            if kind == "lead":
+                floor = int(profile.get("preferences", {}).get("min_match_score", 65))
+                min_score = int((profile.get("offer") or {}).get("min_match_score") or floor)
+            else:
+                min_score = int(eff.get("preferences", {}).get("min_match_score", 65))
+            for i in range(0, len(items), BATCH_SIZE):
+                batches.append((items[i:i + BATCH_SIZE], eff, resume_text, min_score))
 
         scored = matched = 0
         failed_batches = 0
-        for i in range(0, total, BATCH_SIZE):
+        for batch, eff, resume_text, min_score in batches:
             if should_stop():
                 EventBus.emit("scoring_paused", {"scored": scored, "total": total})
                 break
-            batch = targets[i:i + BATCH_SIZE]
-            results = await asyncio.to_thread(_score_batch, brain, batch, profile, resume_text, kind)
+            results = await asyncio.to_thread(_score_batch, brain, batch, eff, resume_text, kind)
             if not results:
                 failed_batches += 1
                 if failed_batches >= 3 and scored == 0:

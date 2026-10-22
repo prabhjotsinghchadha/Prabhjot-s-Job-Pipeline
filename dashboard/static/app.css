@@ -276,4 +276,6 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 1rem 0; }
 .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface-2); }
 .seg button { border: 0; background: none; padding: .35rem .7rem; font: inherit; font-weight: 600; color: var(--muted); cursor: pointer; }
 .seg button.active { background: var(--accent); color: #fff; }
+.seg.wrap { flex-wrap: wrap; }
+.seg button .count { font-weight: 400; opacity: .75; margin-left: .3rem; }
 .angle { margin-top: .3rem; font-style: italic; color: var(--text); }

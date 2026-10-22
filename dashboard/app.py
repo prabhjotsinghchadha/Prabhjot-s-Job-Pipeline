@@ -159,9 +159,9 @@ async def health() -> dict:
 # --------------------------------------------------------------------------
 # Routers
 # --------------------------------------------------------------------------
-from dashboard.routes import apply, discover, jobs, resume, settings, tracking  # noqa: E402
+from dashboard.routes import apply, discover, jobs, resume, settings, tracking, tracks  # noqa: E402
 
-for router in (jobs.router, discover.router, apply.router, resume.router, tracking.router, settings.router):
+for router in (jobs.router, discover.router, apply.router, resume.router, tracks.router, tracking.router, settings.router):
     app.include_router(router, prefix="/api")
 
 

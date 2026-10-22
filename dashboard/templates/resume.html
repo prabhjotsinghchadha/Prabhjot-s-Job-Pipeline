@@ -5,11 +5,62 @@
     <h1>Resume</h1>
     <span class="spacer"></span>
     <div class="btn-row">
-      <a class="btn sm" href="/api/resume/build?format=pdf" :class="{disabled: !hasBuilder}">Download PDF</a>
-      <a class="btn sm" href="/api/resume/build?format=docx">Download DOCX</a>
+      <a class="btn sm" :href="'/api/resume/build?format=pdf&' + q" :class="{disabled: !hasBuilder && !inherits}">Download PDF</a>
+      <a class="btn sm" :href="'/api/resume/build?format=docx&' + q">Download DOCX</a>
       <button class="btn sm" @click="ats()" :disabled="atsBusy"><span class="spin" x-show="atsBusy" x-cloak></span> ATS check</button>
       <button class="btn primary sm" @click="save()" :disabled="saving || !dirty"><span class="spin" x-show="saving" x-cloak></span> <span x-text="dirty ? 'Save changes' : 'Saved'"></span></button>
     </div>
+  </div>
+
+  <!-- Which resume. Each one targets different roles; Find jobs and the Inbox follow the top-bar choice. -->
+  <div class="row" style="margin-bottom:1rem; flex-wrap:wrap; gap:.5rem">
+    <div class="seg wrap" role="tablist" aria-label="Resumes">
+      <template x-for="x in tracks" :key="x.id">
+        <button :class="{active: cur===x.id}" @click="select(x.id)" :title="(x.roles || []).join(', ')">
+          <span x-text="x.name"></span>
+          <span class="count" x-show="x.counts && x.counts.matched" x-text="x.counts.matched"></span>
+        </button>
+      </template>
+    </div>
+    <button class="btn sm" x-show="!adding" @click="adding=true; $nextTick(() => $refs.newName.focus())">+ New resume</button>
+    <template x-if="adding">
+      <div class="row" style="gap:.4rem">
+        <input type="text" x-ref="newName" x-model="newName" @keydown.enter="addTrack()" @keydown.escape="adding=false" placeholder="e.g. CTO" style="max-width:180px">
+        <button class="btn sm primary" @click="addTrack()" :disabled="!newName.trim()">Create</button>
+        <button class="btn sm link" @click="adding=false">Cancel</button>
+        <span class="tiny muted">Starts as a copy of <strong x-text="t.name"></strong>.</span>
+      </div>
+    </template>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2>What this resume is for</h2>
+      <span class="chip" x-show="isMain">main</span>
+      <span class="spacer"></span>
+      <button class="btn sm link danger" x-show="!isMain" @click="removeTrack()">Delete this resume</button></div>
+    <div class="grid-2">
+      <label class="field"><span>Name</span><input type="text" x-model="t.name" @input="dirty=true" placeholder="e.g. Senior Software Engineer"></label>
+      <label class="field"><span>Roles it targets (comma-separated)</span>
+        <input type="text" :value="fmt.list(t.roles)" @change="t.roles = fmt.toList($event.target.value); dirty=true" placeholder="CTO, VP Engineering, Head of Engineering"></label>
+    </div>
+    <div class="grid-2">
+      <label class="field"><span>Search queries (optional, defaults to the roles)</span>
+        <input type="text" :value="fmt.list(t.search_queries)" @change="t.search_queries = fmt.toList($event.target.value); dirty=true"></label>
+      <label class="field"><span>Keywords (optional)</span>
+        <input type="text" :value="fmt.list(t.keywords)" @change="t.keywords = fmt.toList($event.target.value); dirty=true"></label>
+    </div>
+    <label class="field"><span>Ideal job, in a few sentences (Claude scores postings against this)</span>
+      <textarea x-model="t.ideal_job_description" @input="dirty=true" style="min-height:70px" :placeholder="isMain ? '' : 'Leave empty to use the main one'"></textarea></label>
+    <div class="grid-2">
+      <label class="field"><span>Minimum match score for the Inbox</span>
+        <input type="number" min="0" max="100" x-model.number="t.min_match_score" @input="dirty=true" :placeholder="isMain ? '65' : 'same as main'"></label>
+      <label class="field"><span>PDF to attach when applying</span>
+        <select :value="pdfName" @change="usePdf($event.target.value)">
+          <option value="" x-text="isMain ? 'None (render the builder)' : (hasBuilder ? 'None (render this builder)' : 'None (use ' + mainTrack.name + '\'s)')"></option>
+          <template x-for="f in files" :key="f.name"><option :value="f.name" x-text="f.name" :selected="f.name === pdfName"></option></template>
+        </select></label>
+    </div>
+    <p class="tiny muted">Find jobs searches every resume's roles at once (or just the one picked in the top bar). Each job is matched to the resume whose roles fit its title, then scored against that resume. Tailoring, cover letters and the attached PDF all come from it too.</p>
   </div>
 
   <div class="card" x-show="atsReport" x-cloak>
@@ -26,7 +77,11 @@
       <div class="card">
         <div class="card-head"><h2>Resume builder</h2><span class="spacer"></span>
           <button class="btn link sm" @click="importPdf()" :disabled="importing" title="Have Claude transcribe your uploaded PDF into these fields"><span class="spin" x-show="importing" x-cloak></span> Import from PDF</button></div>
-        <p class="tiny muted">This is the source of truth. PDF and DOCX downloads, ATS checks and per-job tailoring all come from these fields. Nothing here is invented: tailoring only rephrases what you wrote.</p>
+        <p class="tiny muted">This is the source of truth for <strong x-text="t.name"></strong>. PDF and DOCX downloads, ATS checks and per-job tailoring all come from these fields. Nothing here is invented: tailoring only rephrases what you wrote.</p>
+        <div class="card flat" x-show="inherits" style="border-color:var(--accent)">
+          <p class="small" style="margin-top:0">This resume has no content of its own yet, so it uses <strong x-text="mainTrack.name"></strong>'s. Start from a copy and reshape it (lead with the experience that matters for these roles), or import a PDF.</p>
+          <button class="btn sm primary" @click="copyMain()">Copy <span x-text="mainTrack.name"></span>'s content</button>
+        </div>
 
         <label class="field"><span>Headline</span><input type="text" x-model="r.headline" @input="dirty=true"></label>
         <label class="field"><span>Summary</span><textarea x-model="r.summary" @input="dirty=true"></textarea></label>
@@ -106,13 +161,15 @@
     <div>
       <div class="card">
         <div class="card-head"><h2>Uploaded PDFs</h2></div>
-        <p class="tiny muted">The default PDF is what gets attached when no builder content or tailoring exists, and what <em>Import from PDF</em> reads.</p>
+        <p class="tiny muted">Each resume attaches its own PDF when there is no tailored version, and <em>Import from PDF</em> reads it.</p>
         <template x-for="f in files" :key="f.name">
           <div class="row small" style="margin-bottom:.4rem">
-            <span><strong x-text="f.name"></strong> <span class="chip good" x-show="f.is_default">default</span> <span class="chip" x-show="f.built">built</span></span>
+            <span><strong x-text="f.name"></strong>
+              <template x-for="u in f.used_by" :key="u"><span class="chip good" x-text="name(u)" style="margin-left:.25rem"></span></template>
+              <span class="chip" x-show="f.built">built</span></span>
             <span class="spacer"></span>
             <a class="btn sm link" :href="'/api/resumes/' + encodeURIComponent(f.name) + '/download'">Download</a>
-            <button class="btn sm link" x-show="!f.is_default" @click="setDefault(f)">Make default</button>
+            <button class="btn sm link" x-show="!f.used_by.includes(cur)" @click="usePdf(f.name)">Use for <span x-text="t.name"></span></button>
             <button class="btn sm link danger" @click="deleteFile(f)">Delete</button>
           </div>
         </template>
@@ -130,13 +187,14 @@
       <div class="card">
         <div class="card-head"><h2>Tailored for a job</h2></div>
         <p class="tiny muted">Tailoring rewrites the summary and bullets for one posting. Start it from a job's Apply panel, or paste a posting below.</p>
-        <template x-for="t in tailored" :key="t.id">
+        <template x-for="tj in tailored" :key="tj.id">
           <div class="row small" style="margin-bottom:.4rem">
-            <span><strong x-text="t.title"></strong> · <span x-text="t.company"></span> <span class="chip" x-text="t.status"></span></span>
+            <span><strong x-text="tj.title"></strong> · <span x-text="tj.company"></span> <span class="chip" x-text="tj.status"></span>
+              <span class="chip accent" x-show="tracks.length > 1" x-text="name(tj.track)"></span></span>
             <span class="spacer"></span>
-            <a class="btn sm link" :href="'/api/resume/build?format=pdf&job_id=' + t.id">PDF</a>
-            <a class="btn sm link" :href="'/api/resume/build?format=docx&job_id=' + t.id">DOCX</a>
-            <button class="btn sm link" @click="ats(t.id)">ATS</button>
+            <a class="btn sm link" :href="'/api/resume/build?format=pdf&job_id=' + tj.id">PDF</a>
+            <a class="btn sm link" :href="'/api/resume/build?format=docx&job_id=' + tj.id">DOCX</a>
+            <button class="btn sm link" @click="ats(tj.id)">ATS</button>
           </div>
         </template>
         <div class="muted small" x-show="!tailored.length">None yet.</div>
@@ -149,7 +207,7 @@
         <label class="field"><span>URL (optional, fetched if description is empty)</span><input type="url" x-model="custom.url"></label>
         <label class="field"><span>Job description</span><textarea x-model="custom.description"></textarea></label>
         <button class="btn primary sm" @click="customize()" :disabled="custom.busy"><span class="spin" x-show="custom.busy" x-cloak></span> Add job and tailor</button>
-        <p class="tiny muted">The job lands in your Inbox as well, so you can apply to it from there.</p>
+        <p class="tiny muted">Tailored from <strong x-text="t.name"></strong>. The job lands in your Inbox as well, so you can apply to it from there.</p>
       </div>
     </div>
   </div>

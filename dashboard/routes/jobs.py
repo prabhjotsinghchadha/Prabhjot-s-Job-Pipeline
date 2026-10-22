@@ -4,10 +4,10 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 
-from dashboard.routes import require_job, valid_kind
+from dashboard.routes import load_profile, require_job, track_filter, valid_kind
 from utils.tracker import (
     STAGES, VALID_STATUSES, delete_job, get_all_jobs, get_companies, get_score_distribution,
-    get_stats, get_timeline_stats, ignore_jobs, update_job_notes, update_job_status,
+    get_stats, get_timeline_stats, ignore_jobs, set_job_track, update_job_notes, update_job_status,
 )
 
 router = APIRouter(tags=["jobs"])
@@ -17,12 +17,13 @@ router = APIRouter(tags=["jobs"])
 async def list_jobs(
     status: Optional[str] = None, company: Optional[str] = None, min_score: Optional[int] = None,
     search: Optional[str] = None, sort_by: str = "discovered_at", sort_order: str = "desc",
-    limit: int = 50, offset: int = 0, kind: str = "job",
+    limit: int = 50, offset: int = 0, kind: str = "job", track: Optional[str] = None,
 ) -> dict:
-    """status may be a comma-separated list (e.g. applied,interviewing). kind = job | lead."""
+    """status may be a comma-separated list (e.g. applied,interviewing). kind = job | lead.
+    track = a resume track id ('main' for the main resume); omit for all."""
     jobs, total = get_all_jobs(status=status, company=company, min_score=min_score, search=search,
                                sort_by=sort_by, sort_order=sort_order, limit=limit, offset=offset,
-                               kind=valid_kind(kind))
+                               kind=valid_kind(kind), track=track_filter(track))
     from utils.pipeline import _unpack_meta
     for j in jobs:
         _unpack_meta(j)
@@ -39,8 +40,14 @@ async def get_job(job_id: str) -> dict:
 
 @router.patch("/jobs/{job_id}")
 async def update_job(job_id: str, body: dict) -> dict:
-    """Body: {status?, notes?}"""
-    require_job(job_id)
+    """Body: {status?, notes?, track?}. Changing track clears the cover letter and tailoring."""
+    job = require_job(job_id)
+    if "track" in body and job.get("kind") != "lead":
+        from utils.tracks import get_track, norm_id
+        if not get_track(load_profile(), body["track"] or "main"):
+            raise HTTPException(status_code=400, detail="Unknown resume track")
+        if norm_id(body["track"]) != (job.get("track") or ""):
+            set_job_track(job_id, norm_id(body["track"]))
     if "status" in body and not update_job_status(job_id, body["status"]):
         kind = require_job(job_id).get("kind", "job")
         raise HTTPException(status_code=400, detail=f"Invalid status for a {kind}. Valid: {STAGES[kind]}")
@@ -75,8 +82,8 @@ async def remove_job(job_id: str) -> dict:
 
 
 @router.get("/stats")
-async def stats(kind: str = "job") -> dict:
-    return get_stats(valid_kind(kind))
+async def stats(kind: str = "job", track: Optional[str] = None) -> dict:
+    return get_stats(valid_kind(kind), track_filter(track) if kind != "lead" else None)
 
 
 @router.get("/stats/timeline")

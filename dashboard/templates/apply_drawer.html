@@ -6,6 +6,13 @@
       <button class="btn sm close" @click="closeApply()">Close</button>
       <h2 x-text="apply.job.title"></h2>
       <p class="muted" x-text="apply.job.company + (apply.job.location ? ' · ' + apply.job.location : '')"></p>
+      <label class="row small" x-show="!isLead() && tracks && tracks.length > 1" style="margin-bottom:.75rem; gap:.5rem">
+        <span class="muted">Applying as</span>
+        <select class="theme-select" :value="apply.job.track || 'main'" @change="changeTrack($event.target.value)">
+          <template x-for="t in tracks" :key="t.id"><option :value="t.id" x-text="t.name" :selected="t.id === (apply.job.track || 'main')"></option></template>
+        </select>
+        <span class="tiny muted">Resume, cover letter and tailoring all follow this.</span>
+      </label>
 
       <div class="tabs" x-show="apply.job.apply_email">
         <button :class="{active: apply.mode==='email'}" @click="apply.mode='email'; loadDraft()">By email</button>

@@ -9,7 +9,7 @@ from pathlib import Path
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 
-from dashboard.routes import job_description, load_profile, require_job, save_profile
+from dashboard.routes import job_description, job_profile, load_profile, require_job, save_profile
 from utils.paths import BASE_DIR, resumes_dir
 
 router = APIRouter(tags=["resume"])
@@ -29,13 +29,38 @@ def _save_meta(meta: dict) -> None:
     _meta_path().write_text(json.dumps(meta, indent=2))
 
 
-def _set_profile_resume_path(path: str) -> None:
+def _rel(path: str) -> str:
     try:
-        path = "./" + str(Path(path).relative_to(BASE_DIR))
+        return "./" + str(Path(path).relative_to(BASE_DIR))
     except ValueError:
-        pass
+        return path
+
+
+def _set_profile_resume_path(path: str) -> None:
     profile = load_profile()
-    profile["resume_path"] = path
+    profile["resume_path"] = _rel(path)
+    save_profile(profile)
+
+
+def _same_file(a: str, b: str) -> bool:
+    try:
+        return bool(a and b) and Path(a).resolve() == Path(b).resolve()
+    except OSError:
+        return False
+
+
+def use_pdf_for_track(track: str, name: str) -> None:
+    """Point a resume track at an uploaded PDF ('' name = none). Main = the default PDF."""
+    from utils.tracks import MAIN, update_track
+    meta = _load_meta()
+    if name and name not in meta:
+        raise HTTPException(status_code=404, detail="Resume not found")
+    if (track or MAIN) == MAIN:
+        for key in meta:
+            meta[key]["is_default"] = key == name
+        _save_meta(meta)
+    profile = load_profile()
+    update_track(profile, track or MAIN, {"resume_path": _rel(str(resumes_dir() / meta[name]["filename"])) if name else ""})
     save_profile(profile)
 
 
@@ -48,8 +73,18 @@ def _safe_name(name: str) -> str:
 
 @router.get("/resumes")
 async def list_resumes() -> list:
-    return [{"name": n, **info, "exists": (resumes_dir() / info["filename"]).exists()}
-            for n, info in _load_meta().items()]
+    """Uploaded PDFs; `used_by` lists the resume tracks that attach each one."""
+    from utils.tracks import list_tracks
+    try:
+        tracks = list_tracks(load_profile())
+    except HTTPException:
+        tracks = []
+    out = []
+    for n, info in _load_meta().items():
+        path = str(resumes_dir() / info["filename"])
+        used_by = [t["id"] for t in tracks if _same_file(t.get("resume_path") or "", path)]
+        out.append({"name": n, **info, "exists": Path(path).exists(), "used_by": used_by})
+    return out
 
 
 @router.post("/resumes")
@@ -74,6 +109,13 @@ async def delete_resume(name: str) -> dict:
         raise HTTPException(status_code=404, detail="Resume not found")
     path = resumes_dir() / meta[name]["filename"]
     was_default = meta[name].get("is_default", False)
+    from utils.tracks import list_tracks, update_track
+    profile = load_profile()
+    users = [t["id"] for t in list_tracks(profile) if not t["is_main"] and _same_file(t.get("resume_path") or "", str(path))]
+    for tid in users:
+        update_track(profile, tid, {"resume_path": ""})
+    if users:
+        save_profile(profile)
     if path.exists():
         path.unlink()
     del meta[name]
@@ -86,15 +128,10 @@ async def delete_resume(name: str) -> dict:
 
 
 @router.patch("/resumes/{name}/default")
-async def set_default_resume(name: str) -> dict:
-    meta = _load_meta()
-    if name not in meta:
-        raise HTTPException(status_code=404, detail="Resume not found")
-    for key in meta:
-        meta[key]["is_default"] = key == name
-    _save_meta(meta)
-    _set_profile_resume_path(str(resumes_dir() / meta[name]["filename"]))
-    return {"ok": True, "default": name}
+async def set_default_resume(name: str, track: str = "main") -> dict:
+    """Use this PDF for a resume track (default: the main one)."""
+    use_pdf_for_track(track, name)
+    return {"ok": True, "default": name, "track": track}
 
 
 @router.get("/resumes/{name}/download")
@@ -109,6 +146,12 @@ async def download_resume(name: str):
 
 
 # ---------------------------------------------------------------- builder
+
+def _builder_profile(job, track: str = "") -> dict:
+    """The job's track when there is a job, else the requested track."""
+    from utils.tracks import profile_for_track
+    return job_profile(job) if job else profile_for_track(load_profile(), track)
+
 
 def _job_context(job_id: str):
     """(job, tailored, description) or (None, None, '')."""
@@ -127,13 +170,14 @@ def _suffix(job) -> str:
 
 
 @router.get("/resume/build")
-async def resume_build(format: str = "pdf", job_id: str = ""):
-    """Render the builder as pdf | docx | txt. With job_id the stored tailoring is overlaid."""
+async def resume_build(format: str = "pdf", job_id: str = "", track: str = ""):
+    """Render the builder as pdf | docx | txt for a resume track. With job_id the job's
+    track is used and its stored tailoring is overlaid."""
     from utils.resume_builder import build_resume, has_structured_resume
-    profile = load_profile()
+    job, tailored, _ = _job_context(job_id)
+    profile = _builder_profile(job, track)
     if not has_structured_resume(profile):
         raise HTTPException(status_code=400, detail="The resume builder is empty. Fill it in or import your PDF first.")
-    job, tailored, _ = _job_context(job_id)
     try:
         data, filename, mime = await asyncio.to_thread(build_resume, profile, format, tailored, _suffix(job))
     except ValueError as e:
@@ -143,12 +187,12 @@ async def resume_build(format: str = "pdf", job_id: str = ""):
 
 
 @router.get("/resume/ats")
-async def resume_ats(job_id: str = "", source: str = "builder") -> dict:
-    """ATS report for the builder (tailored when job_id given) or the uploaded PDF (source=uploaded)."""
+async def resume_ats(job_id: str = "", source: str = "builder", track: str = "") -> dict:
+    """ATS report for a track's builder (tailored when job_id given) or its uploaded PDF (source=uploaded)."""
     from utils.ats_checker import check_ats, check_ats_file, extract_keywords
     from utils.resume_builder import apply_tailoring, render_text, resume_from_profile
-    profile = load_profile()
     job, tailored, desc = _job_context(job_id)
+    profile = _builder_profile(job, track)
     if job:
         keywords = extract_keywords(desc, exclude=[job.get("company") or ""])
         for kw in (tailored or {}).get("keywords_to_include") or []:
@@ -174,12 +218,14 @@ async def resume_ats(job_id: str = "", source: str = "builder") -> dict:
 
 @router.post("/resume/import")
 async def resume_import(body: dict = {}) -> dict:
-    """Transcribe an uploaded PDF into the structured builder with Claude. {name?, save?: true}"""
+    """Transcribe an uploaded PDF into a track's builder with Claude. {name?, track?, save?: true}"""
     from utils.ats_checker import extract_pdf_text
     from utils.brain import ClaudeBrain
     from utils.resume_parser import extract_resume_text
     from utils.resume_tailor import parse_resume_to_structure
-    profile = load_profile()
+    from utils.tracks import MAIN, profile_for_track, update_track
+    track = body.get("track") or MAIN
+    profile = profile_for_track(load_profile(), track)
     meta = _load_meta()
     name = (body.get("name") or "").strip()
     if name:
@@ -199,35 +245,43 @@ async def resume_import(body: dict = {}) -> dict:
     saved = False
     if body.get("save", True):
         data["use_tailored_when_applying"] = (profile.get("resume") or {}).get("use_tailored_when_applying", True)
-        profile["resume"] = data
-        save_profile(profile)
+        base = load_profile()
+        try:
+            update_track(base, track, {"resume": data})
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Unknown resume track")
+        save_profile(base)
         saved = True
     return {"resume": data, "saved": saved, "source": str(path)}
 
 
 @router.post("/resume/save-as")
 async def resume_save_as(body: dict = {}) -> dict:
-    """Render the builder (tailored for job_id if given) to a PDF in the uploads list. {name, job_id?, set_default?}"""
+    """Render a track's builder (tailored for job_id if given) to a PDF in the uploads list.
+    {name, job_id?, track?, set_default?} — set_default makes it that track's PDF."""
     from utils.resume_builder import build_resume, has_structured_resume
-    profile = load_profile()
+    from utils.tracks import MAIN
+    track = body.get("track") or MAIN
+    job, tailored, _ = _job_context(body.get("job_id") or "")
+    profile = _builder_profile(job, track)
+    if job:
+        track = job.get("track") or MAIN
     if not has_structured_resume(profile):
         raise HTTPException(status_code=400, detail="The resume builder is empty")
     safe = _safe_name(body.get("name"))
-    job, tailored, _ = _job_context(body.get("job_id") or "")
     data, filename, _ = await asyncio.to_thread(build_resume, profile, "pdf", tailored, _suffix(job))
     stored = f"{safe.replace(' ', '_')}_{filename}"
     (resumes_dir() / stored).write_bytes(data)
     meta = _load_meta()
-    set_default = bool(body.get("set_default")) or len(meta) == 0 or meta.get(safe, {}).get("is_default", False)
-    if set_default:
-        for key in meta:
-            meta[key]["is_default"] = False
-    meta[safe] = {"filename": stored, "original_name": filename, "is_default": set_default, "built": True,
-                  "job_id": job["id"] if job else "", "built_at": datetime.now().isoformat(timespec="seconds")}
+    set_default = bool(body.get("set_default")) or (track == MAIN and (
+        len(meta) == 0 or meta.get(safe, {}).get("is_default", False)))
+    meta[safe] = {"filename": stored, "original_name": filename, "is_default": meta.get(safe, {}).get("is_default", False),
+                  "built": True, "job_id": job["id"] if job else "", "track": track,
+                  "built_at": datetime.now().isoformat(timespec="seconds")}
     _save_meta(meta)
     if set_default:
-        _set_profile_resume_path(str(resumes_dir() / stored))
-    return {"name": safe, "filename": stored, "is_default": set_default, "bytes": len(data)}
+        use_pdf_for_track(track, safe)
+    return {"name": safe, "filename": stored, "is_default": set_default, "track": track, "bytes": len(data)}
 
 
 # --------------------------------------------------------------- tailoring
@@ -243,12 +297,12 @@ async def get_tailor(job_id: str) -> dict:
 async def tailor(job_id: str, body: dict = {}) -> dict:
     """Rewrite the builder's bullets/summary for this posting. {notes?} Blocks until done (~30-60s)."""
     from utils.brain import ClaudeBrain
-    from utils.resume_parser import extract_resume_text
     from utils.resume_tailor import tailor_resume
     from utils.tracker import update_tailored_resume
+    from utils.tracks import track_resume_text
     job = require_job(job_id)
-    profile = load_profile()
-    resume_text = extract_resume_text(profile.get("resume_path", ""))
+    profile = job_profile(job)
+    resume_text = track_resume_text(profile)
     result = await asyncio.to_thread(tailor_resume, job_description(job), resume_text, profile,
                                      ClaudeBrain(verbose=False, profile=profile),
                                      (body.get("notes") or ""), job.get("company") or "")
@@ -264,7 +318,7 @@ async def list_tailored() -> list:
     from utils.tracker import get_db
     conn = get_db()
     rows = conn.execute(
-        "SELECT id, title, company, status, match_score FROM applications "
+        "SELECT id, title, company, status, match_score, track FROM applications "
         "WHERE tailored_resume != '' ORDER BY last_activity DESC, discovered_at DESC LIMIT 100").fetchall()
     conn.close()
     return [dict(r) for r in rows]

@@ -87,6 +87,11 @@ ROLE_SYNONYMS = {
     "security": ["security", "appsec", "infosec"],
     "platform": ["platform"],
     "product": ["product engineer"],
+    "cto": ["cto", "chief technology officer", "chief technical officer", "vp engineering",
+            "vp of engineering", "head of engineering", "head of technology"],
+    "chief": ["chief"],
+    "vp": ["vp", "vice president"],
+    "head": ["head of"],
 }
 
 # Seniority / generic words that carry no role information on their own.
@@ -177,6 +182,9 @@ def job_to_dict(job: Any) -> dict:
     for k in ("id", "title", "company", "location", "description", "platform",
               "date_posted", "url", "apply_url"):
         out[k] = getattr(job, k, None)
+    meta = getattr(job, "metadata", None)
+    if isinstance(meta, dict):
+        out["track"] = meta.get("track")
     return out
 
 
@@ -376,10 +384,17 @@ def run_prefilter(profile: dict, jobs: Optional[list] = None, dry_run: bool = Fa
         from utils.tracker import get_unscored_jobs
         jobs = get_unscored_jobs(kind)
 
+    # Each job is judged against the resume track it was found for.
+    from utils.tracks import profile_for_track
+    per_track: dict = {}
+
     for job in jobs:
         j = job_to_dict(job)
         summary["checked"] += 1
-        reason = prefilter_reason(j, profile, kind)
+        track = (j.get("track") or "") if kind == "job" else ""
+        if track not in per_track:
+            per_track[track] = profile_for_track(profile, track) if track else profile
+        reason = prefilter_reason(j, per_track[track], kind)
         if not reason:
             summary["kept"] += 1
             continue

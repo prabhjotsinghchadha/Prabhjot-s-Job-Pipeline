@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
-from dashboard.routes import job_description, load_profile, require_job
+from dashboard.routes import job_description, job_profile, load_profile, require_job
 from utils.events import EventBus
 from utils.system_state import is_paused
 from utils.tracker import (log_applied, update_apply_email, update_apply_url, update_cover_letter,
@@ -31,8 +31,8 @@ async def _cover_letter(job: dict, profile: dict, force: bool = False) -> str:
     existing = (job.get("cover_letter") or "").strip()
     if existing and not force:
         return existing
-    from utils.resume_parser import extract_resume_text
-    resume_text = extract_resume_text(profile.get("resume_path", ""))
+    from utils.tracks import track_resume_text
+    resume_text = track_resume_text(profile)
     letter = await asyncio.to_thread(
         _brain(profile).write_cover_letter, job_description(job), profile, resume_text,
         job.get("company") or "", job.get("title") or "",
@@ -90,7 +90,7 @@ async def cover_letter(job_id: str, body: dict = {}) -> dict:
     if job.get("kind") == "lead":
         p = await _pitch(job, load_profile(), force=bool(body.get("force")))
         return {"job_id": job_id, "cover_letter": p["body"]}
-    letter = await _cover_letter(job, load_profile(), force=bool(body.get("force")))
+    letter = await _cover_letter(job, job_profile(job), force=bool(body.get("force")))
     if not letter:
         raise HTTPException(status_code=502, detail="Claude returned an empty cover letter")
     return {"job_id": job_id, "cover_letter": letter}
@@ -132,7 +132,7 @@ async def apply_kit(job_id: str, body: dict = {}) -> dict:
     resolves aggregator links first.
     """
     job = require_job(job_id)
-    profile = load_profile()
+    profile = job_profile(job)
     if job.get("kind") == "lead":
         return await _outreach_kit(job, profile)
     if body.get("resolve"):
@@ -157,6 +157,7 @@ async def apply_kit(job_id: str, body: dict = {}) -> dict:
         "cover_letter": letter,
         "resume_path": resume,
         "resume_tailored": bool(resume and "tailored" in str(resume)),
+        "track": (profile.get("_track") or {}).get("name") or "",
     }
 
 
@@ -246,7 +247,7 @@ async def email_draft(job_id: str) -> dict:
     if to != job.get("apply_email"):
         update_apply_email(job_id, to)
         job["apply_email"] = to
-    profile = load_profile()
+    profile = job_profile(job)
     if job.get("kind") == "lead":
         if is_paused() and not (job.get("cover_letter") or "").strip():
             raise HTTPException(status_code=409, detail="Paused. Resume to let Claude write the pitch.")
@@ -272,7 +273,7 @@ async def email_send(job_id: str, body: dict) -> dict:
     to, subject, text = (body.get("to") or "").strip(), (body.get("subject") or "").strip(), (body.get("body") or "").strip()
     if not (to and subject and text):
         raise HTTPException(status_code=400, detail="to, subject and body are required")
-    profile = load_profile()
+    profile = job_profile(job)
     is_lead = job.get("kind") == "lead"
     try:
         smtp_config(profile)

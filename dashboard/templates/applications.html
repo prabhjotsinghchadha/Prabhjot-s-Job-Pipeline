@@ -53,6 +53,7 @@
             <span x-show="job.applied_at"> · <span x-text="MODE === 'lead' ? 'contacted' : 'applied'"></span> <span x-text="fmt.date(job.applied_at)"></span></span>
             <span x-show="job.follow_up_date && ['applied','contacted','proposal'].includes(tab)"> · follow up <span x-text="fmt.date(job.follow_up_date)"></span></span>
             <span class="chip" x-show="job.lead_type" x-text="job.lead_type"></span>
+            <span class="chip accent" x-show="tracks.length > 1 && !TRACK && job.kind !== 'lead'" x-text="trackName(tracks, job.track)"></span>
           </div>
           <div class="small" style="margin-top:.4rem">
             <button class="btn link sm" @click="job._notes = !job._notes" x-text="job._notes ? 'Hide notes' : (job.notes ? 'Notes' : 'Add note')"></button>

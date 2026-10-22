@@ -704,19 +704,35 @@ def write_tailored_pdf(profile: dict, job: dict, tailored: dict) -> Path:
     return path
 
 
+def write_builder_pdf(profile: dict) -> Path:
+    """Render the (untailored) builder to resumes/built/<track>.pdf."""
+    from utils.paths import resumes_dir
+    d = resumes_dir() / "built"
+    d.mkdir(parents=True, exist_ok=True)
+    track = re.sub(r"[^A-Za-z0-9_-]+", "_", (profile.get("_track") or {}).get("id") or "main")
+    data, _, _ = build_resume(profile, "pdf")
+    path = d / f"{track}.pdf"
+    path.write_bytes(data)
+    return path
+
+
 def resume_path_for_job(profile: dict, job: dict, tailored: Optional[dict] = None) -> str:
     """
     Decide which resume file to attach/upload for this job:
       * the per-job tailored PDF when structured resume data exists, the job
         has structured tailoring, and `resume.use_tailored_when_applying`
         is not false — freshly rendered so edits are always reflected;
-      * otherwise profile.resume_path (the uploaded PDF).
+      * otherwise profile.resume_path (the uploaded PDF);
+      * or, when there is no uploaded PDF (a resume track with builder content
+        only), the untailored builder rendered to resumes/built/<track>.pdf.
     Never raises; falls back to the uploaded file on any rendering problem.
     """
     base = profile.get("resume_path", "") or ""
     try:
         if not has_structured_resume(profile):
             return base
+        if not base:
+            base = str(write_builder_pdf(profile))
         if (profile.get("resume") or {}).get("use_tailored_when_applying", True) is False:
             return base
         if tailored is None:
