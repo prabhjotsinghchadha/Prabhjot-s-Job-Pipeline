@@ -27,19 +27,21 @@ def discover_hn_jobs(profile: dict) -> list:
     all_jobs = []
 
     try:
-        # Find the latest "Who is Hiring" thread via Algolia search
-        search_url = "https://hn.algolia.com/api/v1/search"
+        # Newest monthly thread. whoishiring also posts "Who wants to be hired?"
+        # and "Freelancer?" threads, so sort by date and pick the hiring one.
+        search_url = "https://hn.algolia.com/api/v1/search_by_date"
         params = {
-            "query": "Ask HN: Who is hiring",
+            "query": "Who is hiring",
             "tags": "story,author_whoishiring",
-            "hitsPerPage": 1,
+            "hitsPerPage": 10,
         }
 
         resp = httpx.get(search_url, params=params, timeout=30)
         resp.raise_for_status()
         data = resp.json()
 
-        hits = data.get("hits", [])
+        hits = [h for h in data.get("hits", [])
+                if re.match(r"^Ask HN: Who is hiring\?", h.get("title", ""))]
         if not hits:
             print("  \u26a0 No 'Who is Hiring' thread found")
             return []
