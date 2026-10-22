@@ -90,9 +90,15 @@ async def _discover_for_current_user():
 
         await discover_all_jobs(profile, on_source_jobs=on_source_jobs)
 
+        # Prefilter the fresh inventory right away so the dashboard shows the
+        # skips immediately instead of at the next scoring run.
+        from utils.prefilter import run_prefilter
+        pf = await asyncio.to_thread(run_prefilter, profile)
+
         _results()["discover"] = {
             "total": counts["total"],
             "new": counts["new"],
+            "prefiltered": pf["skipped"],
             "timestamp": __import__("datetime").datetime.now().isoformat()
         }
         print(f"[Scheduler] Discovery complete: {counts['new']} new jobs from {counts['total']} total")
@@ -112,6 +118,17 @@ async def _score_for_current_user():
             return
         unscored = get_unscored_jobs()
         if not unscored:
+            return
+
+        # Zero-token gate: drop obvious misses before any AI call.
+        from utils.prefilter import run_prefilter
+        pf = await asyncio.to_thread(run_prefilter, profile, unscored)
+        if pf["skipped"]:
+            print(f"[Scheduler] Prefilter skipped {pf['skipped']}/{pf['checked']} jobs (0 tokens): {pf['reasons']}")
+        unscored = get_unscored_jobs()
+        if not unscored:
+            _results()["score"] = {"scored": 0, "prefiltered": pf["skipped"],
+                                   "timestamp": __import__("datetime").datetime.now().isoformat()}
             return
 
         brain = ClaudeBrain(verbose=False, profile=profile)
@@ -139,6 +156,7 @@ async def _score_for_current_user():
 
         _results()["score"] = {
             "scored": scored,
+            "prefiltered": pf["skipped"],
             "timestamp": __import__("datetime").datetime.now().isoformat()
         }
         print(f"[Scheduler] Scored {scored} jobs")

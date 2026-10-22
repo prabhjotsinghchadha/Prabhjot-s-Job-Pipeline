@@ -47,3 +47,7 @@ profile.yaml
 # Node (Railway IaC SDK only)
 node_modules/
 system_state.json
+
+# Recovered DB copies (contain personal pipeline data)
+applications.restored-*.db*
+applications.db.*.bak

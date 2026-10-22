@@ -195,7 +195,7 @@ def _pause_gated(path: str, method: str) -> bool:
         return False
     if path in _PAUSE_GATED_EXACT:
         return True
-    if path.startswith("/api/jobs/") and path.endswith("/tailor"):
+    if path.startswith("/api/jobs/") and path.endswith(("/tailor", "/cover-letter")):
         return True
     return path.startswith(_PAUSE_GATED_PREFIXES)
 
@@ -1093,10 +1093,15 @@ async def trigger_discover() -> dict:
             on_source_jobs, counts = _incremental_saver()
             await discover_all_jobs(profile, on_source_jobs=on_source_jobs)
 
+            # Zero-token prefilter on the new inventory (skips are visible at once).
+            from utils.prefilter import run_prefilter
+            pf = await asyncio.to_thread(run_prefilter, profile)
+
             await broadcast_event(
                 {
                     "type": "discovery_complete",
-                    "data": {"total": counts["total"], "new": counts["new"]},
+                    "data": {"total": counts["total"], "new": counts["new"],
+                             "prefiltered": pf["skipped"]},
                 }
             )
         except Exception as exc:
@@ -1162,6 +1167,58 @@ async def rescore_job(job_id: str) -> dict:
 
     asyncio.create_task(_do_rescore())
     return {"status": "started"}
+
+
+async def _ensure_cover_letter(job: dict, profile: dict, brain, dry_run: bool = False) -> str:
+    """The job's stored cover letter, or — for a LIVE apply with none stored
+    (preferences.cover_letters = on_demand) — one written now and saved.
+    Dry runs never spend tokens on a letter. Never raises: an AI failure just
+    means the form is filled without a letter."""
+    existing = (job.get("cover_letter") or "").strip()
+    if existing or dry_run:
+        return existing
+    try:
+        from utils.resume_parser import extract_resume_text
+        from utils.tracker import update_cover_letter
+        resume_text = extract_resume_text(profile.get("resume_path", ""))
+        desc = job.get("description") or f"Job: {job.get('title')} at {job.get('company')}"
+        letter = await asyncio.to_thread(
+            brain.write_cover_letter, desc, profile, resume_text,
+            job.get("company") or "", job.get("title") or "",
+        )
+    except Exception as exc:
+        print(f"  Cover letter generation failed for {job.get('id')}: {exc}")
+        return ""
+    if letter:
+        update_cover_letter(job["id"], letter)
+        job["cover_letter"] = letter
+    return letter
+
+
+async def _cover_letter_in_background(job: dict) -> None:
+    """Write (or rewrite) the cover letter for `job`, store it, broadcast."""
+    job_id = job["id"]
+    try:
+        from utils.brain import ClaudeBrain
+        profile = _load_profile()
+        brain = ClaudeBrain(verbose=False, profile=profile)
+        letter = await _ensure_cover_letter({**job, "cover_letter": ""}, profile, brain)
+        if not letter:
+            raise RuntimeError("AI returned an empty cover letter")
+        await broadcast_event({"type": "cover_letter_complete", "data": {"id": job_id}})
+    except Exception as exc:
+        await broadcast_event({"type": "cover_letter_error", "data": {"id": job_id, "error": str(exc)}})
+
+
+@app.post("/api/jobs/{job_id}/cover-letter")
+async def generate_cover_letter(job_id: str) -> dict:
+    """Write a cover letter for ONE job on request. This is the on-demand
+    counterpart to scoring-time letters (preferences.cover_letters)."""
+    job = get_job_by_id(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    asyncio.create_task(_cover_letter_in_background(job))
+    return {"status": "started", "job_id": job_id}
 
 
 async def _tailor_in_background(job: dict, notes: str = "") -> None:
@@ -1313,6 +1370,17 @@ async def get_tailor(job_id: str) -> dict:
     return get_tailored_resume(job_id)
 
 
+@app.post("/api/prefilter")
+async def run_prefilter_now(body: dict = {}) -> dict:
+    """Run the zero-token prefilter over the unscored backlog right now.
+    Body: {"dry_run": true} previews what WOULD be skipped without writing."""
+    from utils.prefilter import run_prefilter
+    profile = _load_profile()
+    dry_run = bool((body or {}).get("dry_run", False))
+    summary = await asyncio.to_thread(run_prefilter, profile, None, dry_run)
+    return {"ok": True, "dry_run": dry_run, **summary}
+
+
 @app.post("/api/score-all")
 async def score_all_unscored() -> dict:
     """
@@ -1331,6 +1399,16 @@ async def score_all_unscored() -> dict:
             profile_path = usercontext.profile_path()
             with open(profile_path) as f:
                 profile = yaml.safe_load(f)
+
+            # Zero-token gate first; only survivors are sent to the AI.
+            from utils.prefilter import run_prefilter
+            pf = await asyncio.to_thread(run_prefilter, profile, unscored)
+            unscored = get_unscored_jobs()
+            if not unscored:
+                await broadcast_event(
+                    {"type": "score_all_complete", "data": {"count": 0, "prefiltered": pf["skipped"]}}
+                )
+                return
 
             brain = ClaudeBrain(verbose=False, profile=profile)
             from utils.resume_parser import extract_resume_text
@@ -1386,7 +1464,8 @@ async def score_all_unscored() -> dict:
                         return
 
             await broadcast_event(
-                {"type": "score_all_complete", "data": {"count": len(unscored)}}
+                {"type": "score_all_complete",
+                 "data": {"count": len(unscored), "prefiltered": pf["skipped"]}}
             )
         except Exception as exc:
             await broadcast_event(
@@ -1451,7 +1530,7 @@ async def apply_single_job(job_id: str, body: dict = {}) -> dict:
                 profile = yaml.safe_load(f)
 
             brain = ClaudeBrain(verbose=False, profile=profile)
-            cover_letter = job.get("cover_letter", "")
+            cover_letter = await _ensure_cover_letter(job, profile, brain, dry_run)
 
             # Upload the per-job tailored PDF when the builder + tailoring exist.
             from utils.resume_builder import profile_with_resume, resume_path_for_job
@@ -1625,7 +1704,7 @@ async def apply_batch(body: dict = {}) -> dict:
                     })
 
                     try:
-                        cover_letter = job.get("cover_letter", "")
+                        cover_letter = await _ensure_cover_letter(job, profile, brain, dry_run)
                         platform = job.get("platform", "")
                         apply_url = job["apply_url"]
 
@@ -2349,6 +2428,10 @@ async def start_yolo(body: dict = {}) -> dict:
 
                     brain = ClaudeBrain(verbose=False, profile=profile)
                     resume_text = extract_resume_text(profile.get("resume_path", ""))
+                    from utils.prefilter import run_prefilter
+                    pf = await asyncio.to_thread(run_prefilter, profile)
+                    if pf["skipped"]:
+                        ylog(f"  Prefilter skipped {pf['skipped']}/{pf['checked']} jobs without AI: {pf['reasons']}")
                     unscored = get_unscored_jobs()
                     min_score = min_score_override or profile["preferences"].get("min_match_score", 65)
                     scored_count = 0
@@ -2439,7 +2522,7 @@ async def start_yolo(body: dict = {}) -> dict:
                                 })
 
                                 try:
-                                    cover_letter = job.get("cover_letter", "")
+                                    cover_letter = await _ensure_cover_letter(job, profile, brain, dry_run)
                                     platform = job.get("platform", "")
                                     apply_url = job["apply_url"]
 

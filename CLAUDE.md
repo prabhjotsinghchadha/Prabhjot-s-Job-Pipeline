@@ -57,6 +57,8 @@ This system discovers jobs from 7+ automated sources, scores them with AI, fills
 - **Scores**: 0-100 based on role match, skills overlap, location, ideal job fit, favorite company bonus (+10)
 - **Output fields**: `score`, `apply` (bool), `reasoning`, `cover_letter`, `skill_overlap`, `red_flags`, `improve_match`
 - **Threshold**: `profile.yaml → preferences.min_match_score` (default 65)
+- **Prefilter (zero tokens)**: `utils/prefilter.py:run_prefilter(profile)` runs before EVERY scoring loop (scheduler, score-all, YOLO, CLI) and right after discovery. Deterministic rules — `preferences.exclude_companies`, `remote_only`, `locations`, non-engineering/junior/management titles, titles unrelated to `preferences.roles`, stale `date_posted` — mark misses `skipped` with reasoning `Prefilter: …` so they stay visible and RESCORE still force-scores them. Config: `preferences.prefilter`. Manual run / preview: `POST /api/prefilter {"dry_run": true|false}`.
+- **Cover letters**: `preferences.cover_letters` — `auto` (legacy: scoring writes a letter for every job ≥ threshold) or `on_demand` (scoring returns no letter; `POST /api/jobs/{id}/cover-letter` / the job row's GENERATE button writes one, and live applies write one automatically if missing via `_ensure_cover_letter()`). Use `on_demand` to save tokens — most scored jobs are never applied to.
 
 ### Tracking Engine
 
@@ -116,6 +118,7 @@ These run automatically. Trigger manually with `POST /api/discover` or `python3.
 ```
 POST   /api/discover              — Trigger full discovery run
 POST   /api/score-all             — Score all unscored jobs
+POST   /api/prefilter             — Zero-token prefilter of the unscored backlog ({dry_run: true} previews)
 POST   /api/rescore/{id}          — Re-score one job
 POST   /api/ingest                — Ingest MCP-discovered jobs: {"jobs": [...]}
 POST   /api/check-email           — Check email for status updates
@@ -332,6 +335,7 @@ utils/
   adzuna_source.py             — Adzuna API (needs free key)
   career_page_source.py        — Playwright + AI extraction from any career URL
   mcp_source.py                — MCP tool helpers: query generation, WebSearch parsing, ingestion
+  prefilter.py                 — Deterministic zero-token prefilter run before AI scoring
   resume_parser.py             — PDF text extraction with caching
   resume_builder.py            — profile.resume → ATS-friendly PDF/DOCX/text; tailoring overlay; tailored PDF per job
   resume_tailor.py             — Claude tailoring (structured per-role rewrites + legacy mode) and PDF→structure import

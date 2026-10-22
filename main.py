@@ -38,6 +38,7 @@ except ImportError:  # bare host install — only `login` explains how to fix
 
 from utils.brain import ClaudeBrain
 from utils.discovery import discover_all_jobs
+from utils.prefilter import prefilter_reason, run_prefilter
 from utils.tracker import (
     is_already_seen, log_discovered, log_matched,
     log_applied, log_skipped, get_today_count, print_stats,
@@ -103,6 +104,12 @@ async def cmd_discover(profile: dict):
         log_discovered(job)
 
         print(f"  [{i+1}/{len(jobs)}] 🔍 {job.title} @ {job.company} ({job.location})")
+
+        pf_reason = prefilter_reason(job, profile)
+        if pf_reason:
+            log_skipped(job.id, f"Prefilter: {pf_reason}")
+            print(f"           ⏭ Prefilter: {pf_reason} (no AI call)")
+            continue
 
         try:
             result = brain.match_job(job.description, profile, resume_text=resume_text)
@@ -171,6 +178,11 @@ async def cmd_apply(profile: dict, dry_run: bool = True):
         if is_already_seen(job.id):
             continue
         log_discovered(job)
+        pf_reason = prefilter_reason(job, profile)
+        if pf_reason:
+            log_skipped(job.id, f"Prefilter: {pf_reason}")
+            print(f"  ⏭ Prefilter: {job.title} @ {job.company} — {pf_reason}")
+            continue
         try:
             result = brain.match_job(job.description, profile, resume_text=resume_text)
             score = result.get("score", 0)
@@ -412,6 +424,9 @@ async def cmd_rescore(profile: dict):
     brain = ClaudeBrain(verbose=True, profile=profile)
     from utils.resume_parser import extract_resume_text
     resume_text = extract_resume_text(profile.get("resume_path", ""))
+    pf = run_prefilter(profile)
+    if pf["skipped"]:
+        print(f"⏭ Prefilter skipped {pf['skipped']}/{pf['checked']} jobs without AI: {pf['reasons']}")
     unscored = get_unscored_jobs()
 
     if not unscored:

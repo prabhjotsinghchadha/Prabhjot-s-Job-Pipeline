@@ -145,6 +145,13 @@ function pipeline() {
     tailorData: {},
     tailoring: {},
 
+    // ----- On-demand Cover Letters -----
+    coverLetterGen: {},
+
+    // ----- Zero-token Prefilter -----
+    prefiltering: false,
+    prefilterResult: null,
+
     // ----- Resume Builder (PROFILE → RESUME BUILDER) -----
     atsReport: null,
     atsChecking: false,
@@ -871,6 +878,57 @@ function pipeline() {
       } catch (err) {
         this.notify(`Notes save failed: ${err.message}`, "error");
       }
+    },
+
+    async runPrefilter(dryRun = false) {
+      this.prefiltering = true;
+      try {
+        const res = await fetch("/api/prefilter", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dry_run: !!dryRun }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        this.prefilterResult = data;
+        this.notify(
+          `${dryRun ? "Preview" : "Prefilter"}: ${data.skipped} of ${data.checked} unscored jobs ${dryRun ? "would be " : ""}skipped (0 tokens).`,
+          "success",
+        );
+        if (!dryRun) {
+          this.fetchJobs();
+          this.fetchStats();
+        }
+      } catch (err) {
+        this.notify(`Prefilter failed: ${err.message}`, "error");
+      } finally {
+        this.prefiltering = false;
+      }
+    },
+
+    async generateCoverLetter(jobId) {
+      this.coverLetterGen[jobId] = true;
+      this.notify("Writing cover letter...", "info");
+      try {
+        const res = await fetch(`/api/jobs/${jobId}/cover-letter`, { method: "POST" });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.detail || `HTTP ${res.status}`);
+        }
+      } catch (err) {
+        this.coverLetterGen[jobId] = false;
+        this.notify(`Cover letter failed: ${err.message}`, "error");
+      }
+    },
+
+    async refreshJob(jobId) {
+      try {
+        const res = await fetch(`/api/jobs/${jobId}`);
+        if (!res.ok) return;
+        const fresh = await res.json();
+        const idx = this.jobs.findIndex((j) => j.id === jobId);
+        if (idx !== -1) this.jobs[idx] = { ...this.jobs[idx], ...fresh };
+      } catch (_) {}
     },
 
     async rescoreJob(jobId) {
@@ -2067,6 +2125,37 @@ function pipeline() {
 
         case "rescore_error":
           this.notify(`Rescore failed: ${event.data.error}`, "error");
+          break;
+
+        case "prefilter_complete":
+          if (event.data.skipped) {
+            this.addFeedItem(
+              `Prefilter skipped ${event.data.skipped}/${event.data.checked} jobs without AI`,
+              "#f59e0b",
+            );
+            this.fetchJobs();
+            this.fetchStats();
+          }
+          break;
+
+        case "cover_letter_complete":
+          this.coverLetterGen[event.data.id] = false;
+          this.notify("Cover letter ready.", "success");
+          this.addFeedItem(
+            `Cover letter written for ${event.data.id?.substring(0, 8)}`,
+            "#8b5cf6",
+          );
+          this.refreshJob(event.data.id);
+          break;
+
+        case "cover_letter_error":
+          this.coverLetterGen[event.data.id] = false;
+          this.notify(`Cover letter failed: ${event.data.error}`, "error");
+          break;
+
+        case "cover_letter_updated":
+          // Also fired when a letter is written at apply time.
+          this.refreshJob(event.data.id);
           break;
 
         case "tailor_complete":

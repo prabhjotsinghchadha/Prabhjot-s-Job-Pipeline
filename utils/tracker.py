@@ -467,6 +467,19 @@ def get_companies() -> list:
     return [row["company"] for row in rows]
 
 
+def update_cover_letter(job_id: str, cover_letter: str) -> bool:
+    """Store an on-demand cover letter for a job (preferences.cover_letters = on_demand)."""
+    conn = get_db()
+    conn.execute(
+        "UPDATE applications SET cover_letter = ? WHERE id = ?",
+        (cover_letter, job_id)
+    )
+    conn.commit()
+    conn.close()
+    _emit("cover_letter_updated", {"id": job_id})
+    return True
+
+
 def update_tailored_resume(job_id: str, tailored_data: dict) -> bool:
     """Store tailored resume data for a job."""
     conn = get_db()

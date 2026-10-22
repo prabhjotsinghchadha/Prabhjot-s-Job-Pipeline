@@ -23,6 +23,17 @@ def CACHE_DIR_FN():
     return cache_dir()
 
 
+def cover_letters_auto(profile: dict) -> bool:
+    """True when scoring should write a cover letter for every matching job.
+
+    profile.yaml → preferences.cover_letters: "auto" (default, legacy
+    behaviour) or "on_demand" (letters only via the dashboard GENERATE
+    button / the cover-letter endpoint, or when actually applying).
+    """
+    mode = str((profile or {}).get("preferences", {}).get("cover_letters", "auto")).lower()
+    return mode not in ("on_demand", "ondemand", "manual", "off", "false")
+
+
 class ClaudeBrain:
     """Interface to AI reasoning — routes through pluggable LLM backends."""
 
@@ -157,6 +168,23 @@ class ClaudeBrain:
         secondary_skills = ", ".join(skills.get("secondary", []))
         ideal_job = profile.get("ideal_job_description", "")
         favorites = profile.get("favorite_companies", [])
+        min_score = profile["preferences"].get("min_match_score", 65)
+        # preferences.cover_letters: "auto" writes a letter for every job that
+        # clears the threshold during scoring; "on_demand" leaves it out so
+        # letters are only generated when the user asks (or when applying).
+        auto_letters = cover_letters_auto(profile)
+        if auto_letters:
+            cover_letter_field = (
+                '  "cover_letter": "<2-3 paragraph tailored cover letter, '
+                'or empty string — see rule below>",\n'
+            )
+            cover_letter_rule = (
+                f"- Write the cover_letter ONLY if score >= {min_score}; otherwise set "
+                'cover_letter to "" — do not waste effort on poor matches\n'
+            )
+        else:
+            cover_letter_field = ""
+            cover_letter_rule = "- Do NOT write a cover letter; it is generated separately on request\n"
 
         prompt = f"""You are a job matching engine. Be critical and honest.
 
@@ -184,8 +212,7 @@ Return this exact JSON structure:
   "skill_overlap": ["<matching skills>"],
   "missing_skills": ["<skills they want that applicant lacks>"],
   "red_flags": ["<any concerns>"],
-  "cover_letter": "<2-3 paragraph tailored cover letter, or empty string — see rule below>",
-  "improve_match": "<one suggestion to improve match for this job>"
+{cover_letter_field}  "improve_match": "<one suggestion to improve match for this job>"
 }}
 
 Scoring guidelines:
@@ -195,9 +222,49 @@ Scoring guidelines:
 - Below 50: Poor match
 - If the company is in the favorites list, add 10 bonus points (max 100)
 - Set "apply" to true only if score >= {profile['preferences'].get('min_match_score', 65)}
-- Write the cover_letter ONLY if score >= {profile['preferences'].get('min_match_score', 65)}; otherwise set cover_letter to "" — do not waste effort on poor matches
+{cover_letter_rule}"""
+        result = self.ask_json(prompt, component="scoring")
+        if not auto_letters and isinstance(result, dict):
+            result["cover_letter"] = ""
+        return result
+
+    def write_cover_letter(
+        self, job_description: str, profile: dict, resume_text: str = "",
+        company: str = "", title: str = "",
+    ) -> str:
+        """Write a cover letter for ONE job on demand (preferences.cover_letters
+        = on_demand keeps this out of scoring so tokens are only spent on jobs
+        the user actually wants)."""
+        personal = profile.get("personal", {})
+        skills = profile.get("skills", {})
+        primary_skills = ", ".join(skills.get("primary", profile["preferences"].get("keywords", [])))
+        heading = f"{title} at {company}" if title or company else "the posting below"
+        prompt = f"""Write a tailored cover letter for {heading}.
+
+APPLICANT:
+- Name: {personal.get('name', '')}
+- Primary skills: {primary_skills}
+- Ideal job: {profile.get('ideal_job_description', '')[:500]}
+
+APPLICANT RESUME:
+{resume_text[:4000] if resume_text else '(No resume provided)'}
+
+JOB POSTING:
+{job_description[:8000]}
+
+Rules:
+- 2-3 short paragraphs, plain text, no subject line, no placeholders like [Company].
+- Lead with the strongest overlap between the resume and the posting's requirements.
+- Only reference experience that is actually in the resume — never invent employers, titles, dates or metrics.
+- End with a one-line sign-off using the applicant's name.
+
+Return this exact JSON structure:
+{{
+  "cover_letter": "<the letter>"
+}}
 """
-        return self.ask_json(prompt, component="scoring")
+        result = self.ask_json(prompt, component="cover_letter")
+        return (result.get("cover_letter") or "").strip() if isinstance(result, dict) else ""
 
     def score_profile(self, profile: dict, resume_text: str = "") -> dict:
         """Analyze the user's profile and resume for job market readiness."""

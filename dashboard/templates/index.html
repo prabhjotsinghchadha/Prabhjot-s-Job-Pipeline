@@ -21,7 +21,7 @@
     </script>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-    <script defer src="/static/app.js?v=20260907c"></script>
+    <script defer src="/static/app.js?v=20261022b"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 
     <link rel="stylesheet" href="/static/style.css?v=20260828a" />
@@ -785,11 +785,19 @@
                                             <div>
                                                 <div class="flex items-center justify-between mb-2">
                                                     <span class="pref-label">Cover Letter</span>
-                                                    <button x-show="job.cover_letter" @click="copyCoverLetter(job.cover_letter)"
-                                                            class="text-[0.6rem] font-mono text-cyan-500 hover:text-cyan-300">COPY</button>
+                                                    <div class="flex items-center gap-3">
+                                                        <button @click.stop="generateCoverLetter(job.id)" :disabled="coverLetterGen[job.id]"
+                                                                class="text-[0.6rem] font-mono text-violet-400 hover:text-violet-300 disabled:opacity-50"
+                                                                :title="job.cover_letter ? 'Rewrite the cover letter for this job (uses AI)' : 'Write a cover letter for this job (uses AI)'">
+                                                            <span x-show="!coverLetterGen[job.id]" x-text="job.cover_letter ? 'REGENERATE' : 'GENERATE'"></span>
+                                                            <span x-show="coverLetterGen[job.id]">WRITING...</span>
+                                                        </button>
+                                                        <button x-show="job.cover_letter" @click="copyCoverLetter(job.cover_letter)"
+                                                                class="text-[0.6rem] font-mono text-cyan-500 hover:text-cyan-300">COPY</button>
+                                                    </div>
                                                 </div>
                                                 <p class="text-[0.78rem] text-[#94a3b8] whitespace-pre-wrap leading-relaxed max-h-44 overflow-y-auto font-mono"
-                                                   x-text="job.cover_letter || 'Not generated.'"></p>
+                                                   x-text="job.cover_letter || (coverLetterGen[job.id] ? 'Writing...' : 'Not generated — click GENERATE when you want one.')"></p>
                                             </div>
                                             <!-- Notes -->
                                             <div class="md:col-span-2">
@@ -2022,6 +2030,78 @@
                                    @change="updateProfileField('preferences.remote_only', $event.target.checked)" />
                             Remote Only
                         </label>
+                        <!-- Prefilter -->
+                        <div class="p-3 rounded-lg bg-[#0a0e17] border border-[#1e293b] space-y-2">
+                            <div class="flex items-center justify-between">
+                                <label class="pref-label flex items-center gap-2 cursor-pointer mb-0">
+                                    <input type="checkbox"
+                                           :checked="fullProfile.preferences?.prefilter?.enabled !== false"
+                                           @change="updateProfileField('preferences.prefilter.enabled', $event.target.checked)" />
+                                    Zero-token Prefilter
+                                </label>
+                                <div class="flex items-center gap-3">
+                                    <button @click="runPrefilter(true)" :disabled="prefiltering"
+                                            class="text-[0.6rem] font-mono text-[#94a3b8] hover:text-white disabled:opacity-50"
+                                            title="Show what would be skipped without changing anything">PREVIEW</button>
+                                    <button @click="runPrefilter(false)" :disabled="prefiltering"
+                                            class="text-[0.6rem] font-mono text-cyan-500 hover:text-cyan-300 disabled:opacity-50"
+                                            title="Skip obvious misses in the unscored backlog now (no AI calls)">
+                                        <span x-show="!prefiltering">RUN NOW</span><span x-show="prefiltering">...</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <p class="text-[0.6rem] font-mono text-[#64748b]">
+                                Runs before every scoring pass. Skips excluded companies, non-remote postings (when Remote Only is on),
+                                non-engineering / junior / management titles and titles unrelated to your target roles — without any AI call.
+                                Skipped jobs stay visible with a "Prefilter:" reason and RESCORE still force-scores them.
+                            </p>
+                            <div class="flex flex-wrap gap-4">
+                                <label class="pref-label flex items-center gap-2 cursor-pointer mb-0">
+                                    <input type="checkbox"
+                                           :checked="fullProfile.preferences?.prefilter?.require_role_keyword !== false"
+                                           @change="updateProfileField('preferences.prefilter.require_role_keyword', $event.target.checked)" />
+                                    Title must match a target role
+                                </label>
+                                <label class="pref-label flex items-center gap-2 cursor-pointer mb-0">
+                                    <input type="checkbox"
+                                           :checked="fullProfile.preferences?.prefilter?.skip_junior !== false"
+                                           @change="updateProfileField('preferences.prefilter.skip_junior', $event.target.checked)" />
+                                    Skip junior / intern
+                                </label>
+                                <label class="pref-label flex items-center gap-2 cursor-pointer mb-0">
+                                    <input type="checkbox"
+                                           :checked="fullProfile.preferences?.prefilter?.skip_management !== false"
+                                           @change="updateProfileField('preferences.prefilter.skip_management', $event.target.checked)" />
+                                    Skip director / VP / C-level
+                                </label>
+                                <label class="pref-label flex items-center gap-2 mb-0">
+                                    Max posting age (days, 0 = off)
+                                    <input type="number" min="0" max="365" class="mc-select w-20"
+                                           :value="fullProfile.preferences?.prefilter?.max_age_days ?? 60"
+                                           @change="updateProfileField('preferences.prefilter.max_age_days', parseInt($event.target.value) || 0)" />
+                                </label>
+                            </div>
+                            <div x-show="prefilterResult" class="text-[0.65rem] font-mono text-[#94a3b8]">
+                                <span x-text="prefilterResult?.dry_run ? 'Preview: ' : 'Done: '"></span>
+                                <span x-text="(prefilterResult?.skipped ?? 0) + ' of ' + (prefilterResult?.checked ?? 0) + ' unscored jobs ' + (prefilterResult?.dry_run ? 'would be ' : '') + 'skipped'"></span>
+                                <template x-for="(n, k) in (prefilterResult?.reasons || {})" :key="k">
+                                    <span class="ml-2 text-[#64748b]"><span x-text="k"></span>: <span x-text="n"></span></span>
+                                </template>
+                            </div>
+                        </div>
+                        <!-- Cover Letters -->
+                        <div>
+                            <span class="pref-label">Cover Letters</span>
+                            <select class="mc-select w-full"
+                                    :value="fullProfile.preferences?.cover_letters || 'auto'"
+                                    @change="updateProfileField('preferences.cover_letters', $event.target.value)">
+                                <option value="on_demand">On demand — only when I click GENERATE or apply (saves AI tokens)</option>
+                                <option value="auto">Automatic — write one for every job that clears the min score during scoring</option>
+                            </select>
+                            <p class="text-[0.6rem] font-mono text-[#64748b] mt-1">
+                                On demand: scoring only returns the score and reasoning. A letter is written when you press GENERATE on a job, or automatically the moment you actually apply (live applies only, never dry runs).
+                            </p>
+                        </div>
                         <!-- Roles -->
                         <div>
                             <span class="pref-label">Target Roles</span>

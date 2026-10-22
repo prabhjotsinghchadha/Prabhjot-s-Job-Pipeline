@@ -20,6 +20,15 @@ preferences:
   - distributed systems
   - AI
   min_match_score: 65
+  cover_letters: on_demand  # on_demand = only via GENERATE/apply (saves AI tokens); auto = during scoring
+  prefilter:  # zero-token gate before AI scoring (see utils/prefilter.py)
+    enabled: true
+    require_role_keyword: true  # title must share a word family with roles above
+    skip_junior: true           # intern/junior/entry-level titles (roles are senior)
+    skip_management: true       # director/VP/head-of/chief titles
+    max_age_days: 60            # 0 = off; uses date_posted when the source gives one
+    title_blocklist: []         # extra phrases that always skip
+    title_allowlist: []         # phrases that always pass the title rules
   remote_only: false
   locations:
   - San Francisco
