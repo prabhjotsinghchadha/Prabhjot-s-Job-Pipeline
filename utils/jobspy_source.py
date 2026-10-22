@@ -53,15 +53,18 @@ def _indeed_country(location: str) -> str:
     return "usa"
 
 
-def discover_jobspy_jobs(profile: dict) -> list:
+def discover_jobspy_jobs(profile: dict, queries: Optional[list] = None,
+                         job_type: Optional[str] = None) -> list:
     """
     Search for jobs using python-jobspy across multiple job boards.
     Each source is independently optional — if one fails, others continue.
+    `queries` overrides search.queries; `job_type` ("contract", "fulltime", ...)
+    is passed straight to jobspy.
     """
     from utils.discovery import Job
 
     search_config = profile.get("search", {})
-    queries = search_config.get("queries", profile["preferences"].get("roles", []))
+    queries = queries or search_config.get("queries", profile["preferences"].get("roles", []))
     locations = search_config.get("locations", profile["preferences"].get("locations", ["United States"]))
     distance = search_config.get("distance_miles", 100)  # Wide net — let AI score relevance
     results_wanted = search_config.get("results_per_query", 50)  # More results per query
@@ -99,6 +102,7 @@ def discover_jobspy_jobs(profile: dict) -> list:
                     results_wanted=results_wanted,
                     country_indeed=_indeed_country(location),
                     is_remote=profile["preferences"].get("remote_only", False),
+                    **({"job_type": job_type} if job_type else {}),
                 )
 
                 if results is None or len(results) == 0:

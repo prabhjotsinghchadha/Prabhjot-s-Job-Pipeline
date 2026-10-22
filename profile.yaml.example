@@ -76,6 +76,25 @@ search:                  # jobspy
   results_per_query: 25
   salary_min: 0
 
+# Clients mode (the Jobs / Clients switch in the top bar). Claude scores gigs
+# and prospects against this and writes pitches from it. Edit in Settings → Clients.
+offer:
+  enabled: false           # also look for clients on the schedule
+  services: [Next.js + AI product builds, Fractional CTO]
+  engagement_types: [fixed-scope, retainer, hourly]
+  rate_min: 80             # USD/hour
+  rate_max: 150
+  min_budget: 5000         # smallest project worth a pitch
+  availability: 20 hrs/week from next month
+  ideal_client: Funded startup, 5-50 people, shipping a product, needs senior hands fast.
+  red_flags: [equity only, unpaid trial, revenue share]
+  case_studies:
+    - {name: Example Corp, outcome: "Rebuilt checkout, +18% conversion", url: ""}
+  gig_queries: [contract Next.js developer, freelance full stack engineer]
+  prospect_stacks: [Next.js, TypeScript, React, Node.js]   # companies hiring these become prospects
+  prospect_exclude: [vercel, stripe]                        # big companies rarely buy from individuals
+  sources: {hn_freelancer: true, jobspy_contract: true, boards_contract: true, prospects_from_jobs: true}
+
 schedule:
   enabled: true
   discover_interval_hours: 6

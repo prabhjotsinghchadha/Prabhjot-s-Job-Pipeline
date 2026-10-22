@@ -1,7 +1,25 @@
 /* Shared helpers: API calls, WebSocket, toast, formatting, the top bar. */
 
+/* Mode: "job" (apply to postings) or "lead" (pitch clients). Every API call carries it. */
+const MODE = (() => { try { return localStorage.getItem("mode") === "lead" ? "lead" : "job"; } catch (_) { return "job"; } })();
+const L = MODE === "lead" ? {
+  find: "Find clients", score: "Score", act: "Pitch", tracking: "Pipeline", inbox: "Leads",
+  unscored: "unscored leads", decide: "leads to decide on", empty: "No leads to decide on",
+  emptyHint: "Press Find clients in the top bar. Gigs come from the boards; prospects come from companies already hiring in your stack.",
+  applied: "Contacted", moved: "Moved to",
+} : {
+  find: "Find jobs", score: "Score", act: "Apply", tracking: "Applications", inbox: "Inbox",
+  unscored: "unscored", decide: "to decide on, best first", empty: "Nothing to decide on",
+  emptyHint: "Press Find jobs in the top bar to look for new postings.", applied: "Applied", moved: "Moved to",
+};
+function setMode(m) {
+  try { localStorage.setItem("mode", m === "lead" ? "lead" : "job"); } catch (_) {}
+  location.reload();
+}
+
 const api = {
   async call(method, path, body, opts = {}) {
+    if (path.startsWith("/api/") && !/[?&]kind=/.test(path)) path += (path.includes("?") ? "&" : "?") + "kind=" + MODE;
     const init = { method, headers: {} };
     if (body instanceof FormData) init.body = body;
     else if (body !== undefined) { init.headers["Content-Type"] = "application/json"; init.body = JSON.stringify(body); }
@@ -97,6 +115,8 @@ function shell() {
       setInterval(() => this.refresh(), 20000);
       bus.on((ev) => this.onEvent(ev));
     },
+    mode: MODE,
+    L,
     async refresh() {
       try {
         const [stats, sched, state] = await Promise.all([
@@ -104,19 +124,22 @@ function shell() {
           api.get("/api/system/state", { quiet: true }),
         ]);
         this.stats = stats; this.sched = sched; this.paused = state.paused;
-        this.busyDiscover = !!(sched.busy || {}).discover;
-        this.busyScore = !!(sched.busy || {}).score;
+        const b = sched.busy || {};
+        this.busyDiscover = !!(MODE === "lead" ? b.discover_lead : b.discover);
+        this.busyScore = !!(MODE === "lead" ? b.score_lead : b.score);
       } catch (_) {}
     },
     onEvent(ev) {
       const t = ev.type, d = ev.data || {};
-      if (t === "discovery_started") { this.busyDiscover = true; this.progress = "Finding jobs…"; }
-      if (t === "discovery_progress") this.progress = `Finding jobs… ${d.source}: ${d.new} new`;
-      if (t === "discovery_complete") { this.busyDiscover = false; this.progress = null; toast(`Found ${d.new} new jobs (${d.prefiltered} filtered out)`); this.refresh(); }
-      if (t === "discovery_error") { this.busyDiscover = false; this.progress = null; toast("Finding jobs failed: " + d.error, "error"); }
+      if (d.kind && d.kind !== MODE && /^(discovery|scoring)_/.test(t)) return;  // other pipeline's progress
+      const what = MODE === "lead" ? "leads" : "jobs";
+      if (t === "discovery_started") { this.busyDiscover = true; this.progress = `Finding ${what}…`; }
+      if (t === "discovery_progress") this.progress = `Finding ${what}… ${d.source}: ${d.new} new`;
+      if (t === "discovery_complete") { this.busyDiscover = false; this.progress = null; toast(`Found ${d.new} new ${what} (${d.prefiltered} filtered out)`); this.refresh(); }
+      if (t === "discovery_error") { this.busyDiscover = false; this.progress = null; toast(`Finding ${what} failed: ` + d.error, "error"); }
       if (t === "scoring_started") { this.busyScore = true; this.progress = `Scoring 0 / ${d.total}`; }
       if (t === "scoring_progress") this.progress = `Scoring ${d.scored} / ${d.total} (${d.matched} matches)`;
-      if (t === "scoring_complete") { this.busyScore = false; this.progress = null; if (d.total) toast(`Scored ${d.scored} jobs, ${d.matched} matches`); this.refresh(); }
+      if (t === "scoring_complete") { this.busyScore = false; this.progress = null; if (d.total) toast(`Scored ${d.scored} ${what}, ${d.matched} matches`); this.refresh(); }
       if (t === "scoring_paused") { this.busyScore = false; this.progress = null; }
       if (t === "scoring_error") { this.busyScore = false; this.progress = null; toast("Scoring failed: " + d.error, "error"); }
       if (t === "system_state") this.paused = d.paused;
@@ -126,8 +149,8 @@ function shell() {
     refreshSoon() { clearTimeout(this._rt); this._rt = setTimeout(() => this.refresh(), 800); },
     async findJobs() {
       const r = await api.post("/api/discover");
-      if (r.status === "already_running") toast("Already finding jobs");
-      else { this.busyDiscover = true; this.progress = "Finding jobs…"; }
+      if (r.status === "already_running") toast("Already running");
+      else { this.busyDiscover = true; this.progress = L.find + "…"; }
     },
     async scoreJobs() {
       const r = await api.post("/api/score");

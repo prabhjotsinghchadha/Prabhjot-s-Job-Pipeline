@@ -94,6 +94,55 @@
     </div>
   </details>
 
+  <details class="section" :open="MODE === 'lead'">
+    <summary>Clients — what you sell</summary>
+    <div class="body">
+      <p class="tiny muted">Used in Clients mode. Claude scores gigs and prospects against this, and writes pitches from it. Nothing here is sent anywhere by itself.</p>
+      <label class="check"><input type="checkbox" x-model="p.offer.enabled" @change="dirty=true"> Look for clients on the schedule too (otherwise only when you press Find clients)</label>
+      <label class="field"><span>Services you sell (comma-separated)</span>
+        <input type="text" :value="fmt.list(p.offer.services)" @change="p.offer.services = fmt.toList($event.target.value); dirty=true" placeholder="Next.js + AI product builds, Fractional CTO"></label>
+      <div class="grid-3">
+        <label class="field"><span>Engagement types</span>
+          <input type="text" :value="fmt.list(p.offer.engagement_types)" @change="p.offer.engagement_types = fmt.toList($event.target.value); dirty=true" placeholder="fixed-scope, retainer, hourly"></label>
+        <label class="field"><span>Hourly rate, min–max (USD)</span>
+          <div class="row"><input type="number" x-model.number="p.offer.rate_min" @input="dirty=true" style="max-width:110px"> – <input type="number" x-model.number="p.offer.rate_max" @input="dirty=true" style="max-width:110px"></div></label>
+        <label class="field"><span>Smallest project worth pitching (USD)</span><input type="number" x-model.number="p.offer.min_budget" @input="dirty=true"></label>
+      </div>
+      <div class="grid-2">
+        <label class="field"><span>Availability</span><input type="text" x-model="p.offer.availability" @input="dirty=true" placeholder="20 hrs/week from November"></label>
+        <label class="field"><span>Minimum score to show in Leads (blank = same as jobs)</span><input type="number" min="0" max="100" x-model.number="p.offer.min_match_score" @input="dirty=true"></label>
+      </div>
+      <label class="field"><span>Ideal client, in your words</span><textarea x-model="p.offer.ideal_client" @input="dirty=true" placeholder="Funded startup, 5–50 people, shipping a product, needs senior hands fast."></textarea></label>
+      <label class="field"><span>Red flags (comma-separated; these score very low)</span>
+        <input type="text" :value="fmt.list(p.offer.red_flags)" @change="p.offer.red_flags = fmt.toList($event.target.value); dirty=true" placeholder="equity only, unpaid trial, revenue share"></label>
+
+      <h3>Proof points</h3>
+      <template x-for="(c, i) in p.offer.case_studies" :key="'cs'+i">
+        <div class="row" style="margin-bottom:.5rem; align-items:flex-start">
+          <input type="text" x-model="c.name" @input="dirty=true" placeholder="Project / client" style="max-width:200px">
+          <input type="text" x-model="c.outcome" @input="dirty=true" placeholder="What happened, with a number if you have one">
+          <input type="url" x-model="c.url" @input="dirty=true" placeholder="Link (optional)" style="max-width:220px">
+          <button class="btn sm link danger" @click="p.offer.case_studies.splice(i,1); dirty=true">×</button>
+        </div>
+      </template>
+      <button class="btn sm" @click="p.offer.case_studies.push({name:'', outcome:'', url:''}); dirty=true">+ Proof point</button>
+
+      <h3 style="margin-top:1rem">Where to find clients</h3>
+      <label class="check"><input type="checkbox" :checked="p.offer.sources.hn_freelancer !== false" @change="p.offer.sources.hn_freelancer = $event.target.checked; dirty=true"> HN "Seeking freelancer" thread (monthly)</label>
+      <label class="check"><input type="checkbox" :checked="p.offer.sources.jobspy_contract !== false" @change="p.offer.sources.jobspy_contract = $event.target.checked; dirty=true"> Indeed / LinkedIn contract search</label>
+      <label class="check"><input type="checkbox" :checked="p.offer.sources.boards_contract !== false" @change="p.offer.sources.boards_contract = $event.target.checked; dirty=true"> Contract postings on the regular boards</label>
+      <label class="check"><input type="checkbox" :checked="p.offer.sources.prospects_from_jobs !== false" @change="p.offer.sources.prospects_from_jobs = $event.target.checked; dirty=true"> Prospects: companies already hiring in your stack (from your jobs data, no network)</label>
+      <label class="field"><span>Gig search queries (comma-separated)</span>
+        <input type="text" :value="fmt.list(p.offer.gig_queries)" @change="p.offer.gig_queries = fmt.toList($event.target.value); dirty=true" placeholder="contract Next.js developer, freelance full stack engineer, fractional CTO"></label>
+      <div class="grid-2">
+        <label class="field"><span>Prospect stacks (a company counts if its postings mention any)</span>
+          <input type="text" :value="fmt.list(p.offer.prospect_stacks)" @change="p.offer.prospect_stacks = fmt.toList($event.target.value); dirty=true" placeholder="Next.js, TypeScript, React, Node.js, AI, LLM"></label>
+        <label class="field"><span>Never prospect these companies</span>
+          <input type="text" :value="fmt.list(p.offer.prospect_exclude)" @change="p.offer.prospect_exclude = fmt.toList($event.target.value); dirty=true" placeholder="vercel, anthropic, stripe"></label>
+      </div>
+    </div>
+  </details>
+
   <details class="section">
     <summary>Schedule</summary>
     <div class="body">

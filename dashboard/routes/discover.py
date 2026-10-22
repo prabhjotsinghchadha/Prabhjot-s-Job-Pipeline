@@ -4,52 +4,61 @@ import asyncio
 
 from fastapi import APIRouter, HTTPException
 
-from dashboard.routes import load_profile, require_job
+from dashboard.routes import load_profile, require_job, valid_kind
 from utils import pipeline
 
 router = APIRouter(tags=["discover"])
 
 
 @router.post("/discover")
-async def discover() -> dict:
-    """Run every enabled source, then prefilter. Returns at once."""
+async def discover(kind: str = "job") -> dict:
+    """kind=job: run every enabled source. kind=lead: gigs + prospects. Returns at once."""
     profile = load_profile()
+    kind = valid_kind(kind)
+    if kind == "lead":
+        if not (profile.get("offer") or {}).get("services"):
+            raise HTTPException(status_code=400, detail="Describe your offer in Settings → Clients first.")
+        if pipeline.is_running("discover_lead"):
+            return {"status": "already_running"}
+        asyncio.create_task(pipeline.run_lead_discovery(profile))
+        return {"status": "started", "kind": "lead"}
     if pipeline.is_running("discover"):
         return {"status": "already_running"}
     asyncio.create_task(pipeline.run_discovery(profile))
-    return {"status": "started"}
+    return {"status": "started", "kind": "job"}
 
 
 @router.post("/score")
-async def score() -> dict:
+async def score(kind: str = "job") -> dict:
     """Prefilter, then score the unscored backlog in batches. Returns at once."""
     profile = load_profile()
-    if pipeline.is_running("score"):
+    kind = valid_kind(kind)
+    if pipeline.is_running("score" if kind == "job" else "score_lead"):
         return {"status": "already_running"}
     from utils.tracker import get_unscored_jobs
-    count = len(get_unscored_jobs())
-    asyncio.create_task(pipeline.run_scoring(profile))
-    return {"status": "started", "count": count}
+    count = len(get_unscored_jobs(kind))
+    asyncio.create_task(pipeline.run_scoring(profile, kind=kind))
+    return {"status": "started", "count": count, "kind": kind}
 
 
 @router.post("/jobs/{job_id}/score")
 async def score_one(job_id: str) -> dict:
-    """Re-score one job now (skips the prefilter)."""
+    """Re-score one job or lead now (skips the prefilter)."""
     job = require_job(job_id)
     profile = load_profile()
-    result = await pipeline.run_scoring(profile, jobs=[job], force=True)
+    result = await pipeline.run_scoring(profile, jobs=[job], force=True, kind=job.get("kind") or "job")
     if result.get("status") == "already_running":
         raise HTTPException(status_code=409, detail="Scoring is already running; try again when it finishes.")
     return {**result, "job": require_job(job_id)}
 
 
 @router.post("/prefilter")
-async def prefilter(body: dict = {}) -> dict:
+async def prefilter(body: dict = {}, kind: str = "job") -> dict:
     """Zero-token rules over the unscored backlog. {dry_run: true} previews."""
     from utils.prefilter import run_prefilter
     profile = load_profile()
     dry_run = bool(body.get("dry_run", False))
-    return {"dry_run": dry_run, **(await asyncio.to_thread(run_prefilter, profile, None, dry_run))}
+    return {"dry_run": dry_run, **(await asyncio.to_thread(run_prefilter, profile, None, dry_run, valid_kind(kind)))}
 
 
 @router.get("/sources")

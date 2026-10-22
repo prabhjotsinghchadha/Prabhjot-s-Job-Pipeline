@@ -21,11 +21,18 @@ def _paused(name: str) -> bool:
     return False
 
 
+def _clients_on(profile: dict) -> bool:
+    return bool((profile.get("offer") or {}).get("enabled"))
+
+
 async def job_discover():
     profile = pipeline.load_profile()
     if profile and not _paused("discovery"):
         r = await pipeline.run_discovery(profile)
         print(f"[Scheduler] Discovery: {r}")
+        if _clients_on(profile) and not _paused("lead discovery"):
+            r = await pipeline.run_lead_discovery(profile)
+            print(f"[Scheduler] Lead discovery: {r}")
 
 
 async def job_score():
@@ -33,6 +40,9 @@ async def job_score():
     if profile and not _paused("scoring"):
         r = await pipeline.run_scoring(profile)
         print(f"[Scheduler] Scoring: {r}")
+        if _clients_on(profile) and not _paused("lead scoring"):
+            r = await pipeline.run_scoring(profile, kind="lead")
+            print(f"[Scheduler] Lead scoring: {r}")
 
 
 async def job_email():
@@ -105,5 +115,5 @@ def get_scheduler_status() -> dict:
         "paused": is_paused(),
         "jobs": jobs,
         "last_results": pipeline.last_results,
-        "busy": {"discover": pipeline.is_running("discover"), "score": pipeline.is_running("score")},
+        "busy": {k: pipeline.is_running(k) for k in ("discover", "score", "discover_lead", "score_lead")},
     }

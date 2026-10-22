@@ -12,11 +12,21 @@ from pathlib import Path
 from utils.paths import db_path as _db_path
 
 # All valid statuses
-# The pipeline, in order. `saved` = "save for later" from the Inbox.
-VALID_STATUSES = [
-    "discovered", "matched", "saved", "applied", "interviewing", "offer",
-    "rejected", "skipped", "archived",
-]
+# Two pipelines share one table, told apart by `kind`:
+#   job  — a posting you apply to
+#   lead — a gig or a company you pitch (clients mode)
+KINDS = ("job", "lead")
+STAGES = {
+    "job": ["discovered", "matched", "saved", "applied", "interviewing", "offer",
+            "rejected", "skipped", "archived"],
+    "lead": ["discovered", "matched", "saved", "contacted", "call", "proposal",
+             "won", "lost", "skipped", "archived"],
+}
+VALID_STATUSES = list(dict.fromkeys(STAGES["job"] + STAGES["lead"]))
+# Entering these stages schedules a follow-up reminder N days out.
+FOLLOW_UP_DAYS = {"applied": 7, "contacted": 3, "proposal": 5}
+# Stages where a reminder is still meaningful.
+ACTIVE_STAGES = {"job": ("applied", "interviewing"), "lead": ("contacted", "call", "proposal")}
 # Statuses from earlier versions are folded into the list above on connect.
 _LEGACY_STATUS = {"failed": "skipped", "ignored": "skipped", "withdrawn": "archived"}
 
@@ -83,6 +93,7 @@ def _migrate_schema(conn: sqlite3.Connection):
         "last_activity": "TEXT",
         "follow_up_count": "INTEGER DEFAULT 0",
         "apply_email": "TEXT DEFAULT ''",
+        "kind": "TEXT DEFAULT 'job'",
     }
 
     for col, col_type in migrations.items():
@@ -91,6 +102,7 @@ def _migrate_schema(conn: sqlite3.Connection):
                 conn.execute(f"ALTER TABLE applications ADD COLUMN {col} {col_type}")
             except sqlite3.OperationalError:
                 pass  # Column already exists
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_kind ON applications(kind)")
     for old, new in _LEGACY_STATUS.items():
         conn.execute("UPDATE applications SET status = ? WHERE status = ?", (new, old))
 
@@ -129,11 +141,15 @@ def log_discovered(job) -> None:
     conn = get_db()
     try:
         metadata = json.dumps(job.metadata) if isinstance(job.metadata, dict) else job.metadata
+        meta = job.metadata if isinstance(job.metadata, dict) else {}
+        kind = meta.get("kind", "job") if meta.get("kind") in KINDS else "job"
+        if not apply_email and meta.get("apply_email"):
+            apply_email = meta["apply_email"]
         conn.execute("""
             INSERT OR IGNORE INTO applications
             (id, title, company, platform, url, apply_url, location, description, source,
-             salary_min, salary_max, date_posted, metadata, apply_email)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             salary_min, salary_max, date_posted, metadata, apply_email, kind)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             job.id, job.title, job.company, job.platform, job.url, job.apply_url,
             job.location, getattr(job, 'description', ''),
@@ -141,12 +157,12 @@ def log_discovered(job) -> None:
             job.metadata.get('salary_min') if isinstance(job.metadata, dict) else None,
             job.metadata.get('salary_max') if isinstance(job.metadata, dict) else None,
             job.metadata.get('date_posted', '') if isinstance(job.metadata, dict) else '',
-            metadata, apply_email
+            metadata, apply_email, kind
         ))
         conn.commit()
     finally:
         conn.close()
-    _emit("job_discovered", {"id": job.id, "title": job.title, "company": job.company})
+    _emit("job_discovered", {"id": job.id, "title": job.title, "company": job.company, "kind": kind})
 
 
 def log_matched(job_id: str, score: int, reasoning: str, cover_letter: str) -> None:
@@ -198,34 +214,33 @@ def log_skipped(job_id: str, reason: str) -> None:
     conn.close()
 
 
-def get_today_count() -> int:
-    """How many applications have been submitted today."""
+def get_today_count(kind: str = "job") -> int:
+    """Applications sent (or leads contacted) today."""
     conn = get_db()
     row = conn.execute("""
         SELECT COUNT(*) as cnt FROM applications
-        WHERE status = 'applied' AND DATE(applied_at) = DATE('now')
-    """).fetchone()
+        WHERE kind = ? AND status IN ('applied', 'contacted') AND DATE(applied_at) = DATE('now')
+    """, (kind,)).fetchone()
     conn.close()
     return row["cnt"]
 
 
-def get_stats() -> dict:
-    """Get overall application stats."""
+def get_stats(kind: str = "job") -> dict:
+    """Counts per stage for one pipeline."""
     conn = get_db()
-    stats = {}
-    for status in VALID_STATUSES:
-        row = conn.execute(
-            "SELECT COUNT(*) as cnt FROM applications WHERE status = ?", (status,)
-        ).fetchone()
-        stats[status] = row["cnt"]
+    stats = {"kind": kind}
+    counts = {r["status"]: r["cnt"] for r in conn.execute(
+        "SELECT status, COUNT(*) as cnt FROM applications WHERE kind = ? GROUP BY status", (kind,)
+    ).fetchall()}
+    for status in STAGES[kind]:
+        stats[status] = counts.get(status, 0)
 
-    stats["today"] = get_today_count()
+    stats["today"] = get_today_count(kind)
 
-    # Average match score for applied jobs
     row = conn.execute("""
         SELECT AVG(match_score) as avg_score FROM applications
-        WHERE status = 'applied' AND match_score IS NOT NULL
-    """).fetchone()
+        WHERE kind = ? AND status IN ('applied', 'contacted') AND match_score IS NOT NULL
+    """, (kind,)).fetchone()
     stats["avg_match_score"] = round(row["avg_score"] or 0, 1)
 
     conn.close()
@@ -247,7 +262,7 @@ def print_stats():
 
 
 
-def get_unscored_jobs() -> list:
+def get_unscored_jobs(kind: str = "job") -> list:
     """
     Get all jobs that need scoring (discovered with no score).
 
@@ -257,8 +272,8 @@ def get_unscored_jobs() -> list:
     """
     conn = get_db()
     rows = conn.execute(
-        """SELECT * FROM applications
-           WHERE match_score IS NULL AND status = 'discovered'
+        f"""SELECT * FROM applications
+           WHERE match_score IS NULL AND status = 'discovered' AND kind = ?
            ORDER BY CASE
                WHEN platform IN ('yc_jobs','remotive','himalayas','arbeitnow',
                                  'weworkremotely','web3career') THEN 0
@@ -267,7 +282,7 @@ def get_unscored_jobs() -> list:
                WHEN platform IN ('greenhouse','lever') THEN 3
                ELSE 4
            END,
-           discovered_at DESC"""
+           discovered_at DESC""", (kind,)
     ).fetchall()
     conn.close()
     return [dict(row) for row in rows]
@@ -281,13 +296,18 @@ def get_all_jobs(
     sort_by: str = "discovered_at",
     sort_order: str = "desc",
     limit: int = 100,
-    offset: int = 0
+    offset: int = 0,
+    kind: str = None,
 ) -> tuple:
     """Get jobs with filtering, sorting, and pagination. Returns (jobs, total_count)."""
     conn = get_db()
     try:
         conditions = []
         params = []
+
+        if kind:
+            conditions.append("kind = ?")
+            params.append(kind)
 
         if status:
             wanted = [x.strip() for x in status.split(",") if x.strip()]
@@ -338,12 +358,25 @@ def get_job_by_id(job_id: str) -> dict:
 
 
 def update_job_status(job_id: str, status: str) -> bool:
-    """Update a job's status."""
-    if status not in VALID_STATUSES:
-        return False
+    """Move a job/lead to a stage valid for its kind. Entering applied / contacted /
+    proposal schedules the follow-up reminder."""
+    from datetime import timedelta
     conn = get_db()
     try:
-        conn.execute("UPDATE applications SET status = ? WHERE id = ?", (status, job_id))
+        row = conn.execute("SELECT kind FROM applications WHERE id = ?", (job_id,)).fetchone()
+        kind = (row["kind"] if row and row["kind"] in KINDS else "job")
+        if status not in STAGES[kind]:
+            return False
+        now = datetime.now().isoformat()
+        if status in FOLLOW_UP_DAYS:
+            follow_up = (datetime.now() + timedelta(days=FOLLOW_UP_DAYS[status])).isoformat()
+            conn.execute(
+                "UPDATE applications SET status = ?, last_activity = ?, follow_up_date = ?, "
+                "applied_at = COALESCE(applied_at, ?) WHERE id = ?",
+                (status, now, follow_up, now, job_id))
+        else:
+            conn.execute("UPDATE applications SET status = ?, last_activity = ? WHERE id = ?",
+                         (status, now, job_id))
         conn.commit()
     finally:
         conn.close()
@@ -387,25 +420,25 @@ def delete_job(job_id: str) -> bool:
     return cursor.rowcount > 0
 
 
-def get_timeline_stats() -> list:
+def get_timeline_stats(kind: str = "job") -> list:
     """Get application counts grouped by date for charts."""
     conn = get_db()
     rows = conn.execute("""
         SELECT DATE(discovered_at) as date,
                COUNT(*) as total,
-               SUM(CASE WHEN status = 'applied' THEN 1 ELSE 0 END) as applied,
+               SUM(CASE WHEN status IN ('applied', 'contacted') THEN 1 ELSE 0 END) as applied,
                SUM(CASE WHEN status = 'matched' THEN 1 ELSE 0 END) as matched
         FROM applications
-        WHERE discovered_at IS NOT NULL
+        WHERE discovered_at IS NOT NULL AND kind = ?
         GROUP BY DATE(discovered_at)
         ORDER BY date DESC
         LIMIT 30
-    """).fetchall()
+    """, (kind,)).fetchall()
     conn.close()
     return [dict(row) for row in rows]
 
 
-def get_score_distribution() -> list:
+def get_score_distribution(kind: str = "job") -> list:
     """Get score distribution for charts."""
     conn = get_db()
     rows = conn.execute("""
@@ -421,18 +454,19 @@ def get_score_distribution() -> list:
             END as bracket,
             COUNT(*) as count
         FROM applications
+        WHERE kind = ?
         GROUP BY bracket
         ORDER BY bracket DESC
-    """).fetchall()
+    """, (kind,)).fetchall()
     conn.close()
     return [dict(row) for row in rows]
 
 
-def get_companies() -> list:
+def get_companies(kind: str = "job") -> list:
     """Get distinct company names for filter dropdown."""
     conn = get_db()
     rows = conn.execute(
-        "SELECT DISTINCT company FROM applications ORDER BY company"
+        "SELECT DISTINCT company FROM applications WHERE kind = ? ORDER BY company", (kind,)
     ).fetchall()
     conn.close()
     return [row["company"] for row in rows]
@@ -499,31 +533,34 @@ def set_follow_up(job_id: str, days: int = 7) -> bool:
     return True
 
 
-def get_overdue_follow_ups() -> list:
-    """Get jobs past their follow-up date that are still active (applied/interviewing)."""
+def get_overdue_follow_ups(kind: str = "job") -> list:
+    """Rows past their follow-up date that are still in an active stage."""
+    active = ACTIVE_STAGES[kind]
     conn = get_db()
-    rows = conn.execute("""
+    rows = conn.execute(f"""
         SELECT * FROM applications
-        WHERE follow_up_date IS NOT NULL
+        WHERE kind = ?
+          AND follow_up_date IS NOT NULL
           AND follow_up_date <= datetime('now')
-          AND status IN ('applied', 'interviewing')
+          AND status IN ({','.join('?' * len(active))})
         ORDER BY follow_up_date ASC
-    """).fetchall()
+    """, (kind, *active)).fetchall()
     conn.close()
     return [dict(row) for row in rows]
 
 
-def get_ghost_alerts(days: int = 14) -> list:
-    """Get jobs applied more than N days ago with no status change (potential ghosts)."""
+def get_ghost_alerts(days: int = 14, kind: str = "job") -> list:
+    """Applied (or contacted) more than N days ago with no activity since."""
+    first_stage = "applied" if kind == "job" else "contacted"
     conn = get_db()
     rows = conn.execute("""
         SELECT * FROM applications
-        WHERE status = 'applied'
+        WHERE kind = ? AND status = ?
           AND applied_at IS NOT NULL
           AND datetime(applied_at, '+' || ? || ' days') <= datetime('now')
           AND (last_activity IS NULL OR datetime(last_activity, '+' || ? || ' days') <= datetime('now'))
         ORDER BY applied_at ASC
-    """, (days, days)).fetchall()
+    """, (kind, first_stage, days, days)).fetchall()
     conn.close()
     return [dict(row) for row in rows]
 

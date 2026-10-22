@@ -14,17 +14,21 @@
   <header class="topbar" x-data="shell()" x-init="init()">
     <div class="topbar-inner">
       <a class="brand" href="/">Pipeline</a>
+      <div class="seg" role="radiogroup" aria-label="Mode">
+        <button :class="{active: mode==='job'}" @click="setMode('job')">Jobs</button>
+        <button :class="{active: mode==='lead'}" @click="setMode('lead')">Clients</button>
+      </div>
       <nav class="nav">
-        <a href="/" class="{{ 'active' if screen == 'inbox' else '' }}">Inbox</a>
-        <a href="/applications" class="{{ 'active' if screen == 'applications' else '' }}">Applications</a>
+        <a href="/" class="{{ 'active' if screen == 'inbox' else '' }}" x-text="L.inbox">Inbox</a>
+        <a href="/applications" class="{{ 'active' if screen == 'applications' else '' }}" x-text="L.tracking">Applications</a>
         <a href="/resume" class="{{ 'active' if screen == 'resume' else '' }}">Resume</a>
         <a href="/settings" class="{{ 'active' if screen == 'settings' else '' }}">Settings</a>
       </nav>
       <div class="topbar-actions">
         <span class="small muted" x-cloak x-show="progress" x-text="progress"></span>
-        <span class="small muted" x-cloak x-show="!progress && unscored" x-text="unscored + ' unscored'"></span>
+        <span class="small muted" x-cloak x-show="!progress && unscored" x-text="unscored + ' ' + L.unscored"></span>
         <button class="btn sm" @click="findJobs()" :disabled="busyDiscover || paused">
-          <span class="spin" x-show="busyDiscover" x-cloak></span> Find jobs
+          <span class="spin" x-show="busyDiscover" x-cloak></span> <span x-text="L.find">Find jobs</span>
         </button>
         <button class="btn sm" @click="scoreJobs()" :disabled="busyScore || paused || !unscored">
           <span class="spin" x-show="busyScore" x-cloak></span> Score
@@ -47,7 +51,7 @@
   <main>
     {% if not has_profile and screen != 'settings' %}
     <div class="card" style="border-color: var(--accent)">
-      <strong>Welcome.</strong> Fill in <a href="/settings">Settings</a> first: your name, email and the roles you want. Then press <em>Find jobs</em>.
+      <strong>Welcome.</strong> Fill in <a href="/settings">Settings</a> first: your name, email and the roles you want (or your offer, for Clients). Then press <em>Find jobs</em> / <em>Find clients</em>.
     </div>
     {% endif %}
     {% block content %}{% endblock %}

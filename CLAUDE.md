@@ -1,8 +1,9 @@
 # Pipeline — notes for Claude sessions
 
-A local, single-user job-search pipeline: find postings → prefilter → score
-with Claude → the user decides in the Inbox → they apply (email draft or
-assisted manual) → track. Dashboard at `http://localhost:8080`.
+A local, single-user pipeline with two modes sharing one table (`kind` column):
+- **job**: find postings → prefilter → score → user decides in the Inbox → they apply (email draft or assisted manual) → track.
+- **lead** (Clients mode): gigs from boards + prospects built from the jobs data → prefilter → score against `profile.offer` → user pitches (email draft or outreach kit) → Contacted → Call → Proposal → Won/Lost.
+The UI switch (Jobs | Clients) lives in localStorage; `common.js` adds `kind=` to every API call. Dashboard at `http://localhost:8080`.
 
 ## Map
 
@@ -13,8 +14,9 @@ dashboard/app.py          FastAPI app, 4 screens (/ /applications /resume /setti
 dashboard/routes/         jobs.py discover.py apply.py resume.py tracking.py settings.py  (thin; logic in utils/)
 dashboard/templates/      base.html + inbox/applications/resume/settings.html + apply_drawer.html
 dashboard/static/         app.css (theme tokens), common.js (shell: top bar, api, bus), <screen>.js
-utils/pipeline.py         run_discovery, run_scoring (prefilter + 10-job batches), run_email_check, run_follow_up_check
-utils/brain.py            ClaudeBrain: ask, ask_json, match_jobs (batch), match_job, write_cover_letter
+utils/pipeline.py         run_discovery, run_lead_discovery, run_scoring(kind) (prefilter + 10-item batches), run_email_check, run_follow_up_check
+utils/leads.py            is_contract_posting, discover_gigs (HN freelancer thread, jobspy contract, board contract filter), build_prospects
+utils/brain.py            ClaudeBrain: ask, ask_json, match_jobs / match_leads (batch), match_job, write_cover_letter, write_pitch
 utils/discovery.py        SOURCE_REGISTRY, discover_all_jobs(profile, on_source_jobs)
 utils/prefilter.py        run_prefilter(profile, jobs=None, dry_run=False)
 utils/tracker.py          SQLite WAL; VALID_STATUSES; log_discovered/log_matched/log_skipped/log_applied; EventBus emits
@@ -25,12 +27,12 @@ utils/paths.py            data_dir() from DATA_DIR (default repo root): db_path,
 profile.yaml              user config (gitignored); schema in profile.yaml.example
 ```
 
-Statuses: `discovered, matched, saved, applied, interviewing, offer, rejected, skipped, archived`.
+Stages per kind are `utils/tracker.STAGES`; `update_job_status` validates against the row's kind and schedules follow-ups (applied 7d, contacted 3d, proposal 5d).
 
 ## Invariants
 
 1. `utils/brain.py` runs `claude -p --output-format json` with the `CLAUDECODE` env var stripped. Never add it back (nested-session crash).
-2. Nothing is sent or submitted without the user's click. `POST /api/jobs/{id}/email-send` is only called after they reviewed the draft; `POST /api/jobs/{id}/applied` only records what they did themselves. There is no browser auto-fill and there must not be.
+2. Nothing is sent or submitted without the user's click, in either mode. `POST /api/jobs/{id}/email-send` is only called after they reviewed the draft; `POST /api/jobs/{id}/applied` and `/contacted` only record what they did themselves. There is no browser auto-fill and there must not be.
 3. Never commit `profile.yaml`, `applications.db`, `resumes/`, `.env`, `system_state.json`.
 4. Every discovery source is optional and wrapped in try/except; one failing never stops the others.
 5. SQLite stays in WAL mode (CLI and dashboard share the file).
@@ -49,6 +51,7 @@ Statuses: `discovered, matched, saved, applied, interviewing, offer, rejected, s
 
 ## When the user asks you to
 
+- **Find clients**: `POST /api/discover?kind=lead` then `POST /api/score?kind=lead`. Needs `profile.offer.services`. Prospects come from the jobs already in the DB, so run jobs discovery first.
 - **Find jobs**: `POST /api/discover` (or `python main.py discover`), then `POST /api/score`. You can also WebSearch and `POST /api/ingest {jobs:[...]}` (helpers in `utils/mcp_source.py`). Report new count, matches, top scores.
 - **Check status**: `POST /api/check-email` (IMAP) and read `GET /api/follow-ups`. Update statuses with `PATCH /api/jobs/{id}`.
 - **Apply**: never do it for them. Prepare: `POST /api/jobs/{id}/apply-kit` or `/email-draft`, show the result, and let them press Send / Mark as applied in the dashboard.

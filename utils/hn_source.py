@@ -1,171 +1,122 @@
 """
-Hacker News 'Who is Hiring' thread scraper.
-Parses the monthly hiring threads using the HN Algolia API.
-These threads are posted on the 1st of each month by 'whoishiring' user.
+Hacker News monthly threads via the Algolia API.
+
+  "Ask HN: Who is hiring?"                  → jobs  (discover_hn_jobs)
+  "Ask HN: Freelancer? Seeking freelancer?" → gigs  (used by utils/leads.py)
+
+Both are posted by the `whoishiring` account on the 1st of each month.
 """
 
 import hashlib
+import html as html_mod
 import re
+
 import httpx
-from datetime import datetime
+
+_ALGOLIA = "https://hn.algolia.com/api/v1"
+_ATS_DOMAINS = ["greenhouse.io", "lever.co", "ashbyhq.com", "myworkdayjobs.com",
+                "smartrecruiters.com", "jobvite.com", "icims.com"]
+_ROLE_WORDS = ["engineer", "developer", "designer", "manager", "lead", "senior", "junior",
+               "architect", "devops", "sre", "data", "ml", "ai", "frontend", "backend",
+               "fullstack", "full-stack", "full stack", "platform", "infrastructure", "security"]
+_LOCATION_WORDS = ["remote", "onsite", "hybrid", "on-site", "sf", "nyc", "la", "seattle", "austin",
+                   "denver", "chicago", "london", "berlin", "toronto", "new york", "san francisco",
+                   "los angeles", "boston", "usa", "eu"]
+GENERIC_TECH_WORDS = ["engineer", "developer", "architect", "sre", "devops", "sde", "staff", "lead",
+                      "software", "backend", "frontend", "fullstack", "platform", "infrastructure",
+                      "data", "ml", "ai", "cloud", "security", "systems"]
+
+
+def find_thread(title_prefix: str) -> tuple:
+    """Newest whoishiring story whose title starts with `title_prefix`.
+    Returns (thread_id, title, top-level comments). Raises on network errors."""
+    resp = httpx.get(f"{_ALGOLIA}/search_by_date",
+                     params={"query": title_prefix, "tags": "story,author_whoishiring", "hitsPerPage": 10},
+                     timeout=30)
+    resp.raise_for_status()
+    hits = [h for h in resp.json().get("hits", [])
+            if (h.get("title") or "").lower().startswith(title_prefix.lower())]
+    if not hits:
+        raise RuntimeError(f"no thread titled '{title_prefix}…'")
+    thread = hits[0]
+    resp = httpx.get(f"{_ALGOLIA}/items/{thread['objectID']}", timeout=30)
+    resp.raise_for_status()
+    return str(thread["objectID"]), thread.get("title", ""), resp.json().get("children", [])
+
+
+def clean_comment(text: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", text or "")
+    return re.sub(r"\s+", " ", html_mod.unescape(text)).strip()
+
+
+def parse_comment(comment: dict, thread_title: str, keywords: list, extra_meta: dict = None):
+    """One top-level comment → Job, or None when no keyword matches."""
+    from utils.discovery import Job
+
+    clean_text = clean_comment(comment.get("text", ""))
+    if not clean_text:
+        return None
+    text_lower = clean_text.lower()
+    if keywords and not any(kw in text_lower for kw in keywords):
+        return None
+
+    # Common format: "Company | Role | Location | Remote | ..."
+    parts = [p.strip() for p in clean_text.split("|")]
+    company = parts[0][:80] if parts else "Unknown"
+    title, location = "See posting", "See posting"
+    for part in parts[1:]:
+        pl = part.lower()
+        if part.startswith("http") or len(part) > 120:
+            continue
+        if any(kw in pl for kw in _ROLE_WORDS):
+            title = part[:120]
+        elif any(kw in pl for kw in _LOCATION_WORDS):
+            location = part[:100]
+        elif title == "See posting" and len(part) < 80:
+            title = part[:120]
+
+    comment_id = str(comment.get("id", ""))
+    hn_url = f"https://news.ycombinator.com/item?id={comment_id}"
+    urls = [u.rstrip(".,;:!?)") for u in re.findall(r'https?://[^\s<>"\')\],;]+', clean_text) if len(u) > 10]
+    apply_url = hn_url
+    for u in urls:
+        if any(d in u.lower() for d in _ATS_DOMAINS):
+            apply_url = u
+            break
+    else:
+        for u in urls:
+            if any(k in u.lower() for k in ("careers", "jobs", "apply", "hiring")):
+                apply_url = u
+                break
+        else:
+            if urls:
+                apply_url = urls[0]
+    email = re.search(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", clean_text)
+
+    meta = {"source": "hackernews", "thread_title": thread_title,
+            "date_posted": comment.get("created_at", ""),
+            "apply_email": email.group(0) if email else None}
+    meta.update(extra_meta or {})
+    return Job(
+        id=f"hn_{hashlib.md5(hn_url.encode()).hexdigest()[:16]}",
+        title=title, company=company, location=location, url=hn_url, apply_url=apply_url,
+        platform="hackernews", description=clean_text[:5000], department="", metadata=meta,
+    )
 
 
 def discover_hn_jobs(profile: dict) -> list:
-    """Scrape the latest HN 'Who is Hiring' thread for matching jobs."""
-    from utils.discovery import Job
-
+    """Scrape the newest 'Who is hiring?' thread for matching jobs."""
     role_keywords = [kw.lower() for kw in profile["preferences"]["roles"]]
-    # Discovery uses ONLY role titles + generic stems — cast widest net
-    # Skills/keywords are used by AI scoring only, NOT for discovery filtering
-    all_keywords = list(set(
-        role_keywords +
-        ["engineer", "developer", "architect", "sre", "devops", "sde", "staff", "lead",
-         "software", "backend", "frontend", "fullstack", "platform", "infrastructure",
-         "data", "ml", "ai", "cloud", "security", "systems"]
-    ))
-
-    all_jobs = []
-
+    keywords = list(set(role_keywords + GENERIC_TECH_WORDS))
+    jobs = []
     try:
-        # Newest monthly thread. whoishiring also posts "Who wants to be hired?"
-        # and "Freelancer?" threads, so sort by date and pick the hiring one.
-        search_url = "https://hn.algolia.com/api/v1/search_by_date"
-        params = {
-            "query": "Who is hiring",
-            "tags": "story,author_whoishiring",
-            "hitsPerPage": 10,
-        }
-
-        resp = httpx.get(search_url, params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-
-        hits = [h for h in data.get("hits", [])
-                if re.match(r"^Ask HN: Who is hiring\?", h.get("title", ""))]
-        if not hits:
-            print("  \u26a0 No 'Who is Hiring' thread found")
-            return []
-
-        thread = hits[0]
-        thread_id = thread.get("objectID", "")
-        thread_title = thread.get("title", "")
-        print(f"  \U0001f4f0 Found: {thread_title}")
-
-        # Fetch all comments (top-level only = individual job posts)
-        comments_url = f"https://hn.algolia.com/api/v1/items/{thread_id}"
-        resp = httpx.get(comments_url, timeout=30)
-        resp.raise_for_status()
-        thread_data = resp.json()
-
-        children = thread_data.get("children", [])
-        print(f"  \U0001f4f0 {len(children)} postings in thread")
-
+        _, thread_title, children = find_thread("Ask HN: Who is hiring?")
+        print(f"  📰 Found: {thread_title} ({len(children)} postings)")
         for comment in children:
-            text = comment.get("text", "")
-            if not text:
-                continue
-
-            # Clean HTML and decode entities
-            import html as html_mod
-            clean_text = re.sub(r'<[^>]+>', ' ', text)
-            clean_text = html_mod.unescape(clean_text)  # &#x2F; -> /, &amp; -> &, etc.
-            clean_text = re.sub(r'\s+', ' ', clean_text).strip()
-
-            text_lower = clean_text.lower()
-
-            # Filter by keywords
-            if not any(kw in text_lower for kw in all_keywords):
-                continue
-
-            # Extract company, title, location from pipe-separated format
-            # Common HN format: "Company Name | Role | Location | Remote | ..."
-            parts = [p.strip() for p in clean_text.split('|')]
-            company = parts[0][:80] if parts else "Unknown"
-            title = "See posting"
-            location = "See posting"
-
-            if len(parts) >= 2:
-                # Find the role-like part
-                role_keywords_match = ["engineer", "developer", "designer",
-                                       "manager", "lead", "senior", "junior",
-                                       "architect", "devops", "sre", "data",
-                                       "ml", "ai", "frontend", "backend",
-                                       "fullstack", "full-stack", "full stack",
-                                       "platform", "infrastructure", "security"]
-                location_keywords = ["remote", "onsite", "hybrid", "on-site",
-                                     "sf", "nyc", "la", "seattle", "austin",
-                                     "denver", "chicago", "london", "berlin",
-                                     "toronto", "new york", "san francisco",
-                                     "los angeles", "boston", "usa", "eu"]
-
-                for part in parts[1:]:
-                    part_lower = part.lower()
-                    # Skip parts that are URLs or very long
-                    if part.startswith("http") or len(part) > 120:
-                        continue
-                    if any(kw in part_lower for kw in role_keywords_match):
-                        title = part[:120]
-                    elif any(kw in part_lower for kw in location_keywords):
-                        location = part[:100]
-                    elif title == "See posting" and len(part) < 80:
-                        # If we haven't found a title yet, use the second part
-                        title = part[:120]
-
-            comment_id = str(comment.get("id", ""))
-            hn_url = f"https://news.ycombinator.com/item?id={comment_id}"
-
-            # Extract apply URL from comment text (no browser needed)
-            apply_url = hn_url
-            apply_email = None
-            urls_in_text = re.findall(r'https?://[^\s<>"\')\],;]+', clean_text)
-            urls_in_text = [u.rstrip(".,;:!?)") for u in urls_in_text if len(u) > 10]
-
-            # Prefer ATS URLs, then careers/jobs URLs, then any URL
-            ats_domains = ["greenhouse.io", "lever.co", "ashbyhq.com",
-                           "myworkdayjobs.com", "smartrecruiters.com",
-                           "jobvite.com", "icims.com"]
-            for url in urls_in_text:
-                if any(d in url.lower() for d in ats_domains):
-                    apply_url = url
-                    break
-            else:
-                for url in urls_in_text:
-                    if any(kw in url.lower() for kw in ["careers", "jobs", "apply", "hiring"]):
-                        apply_url = url
-                        break
-                else:
-                    if urls_in_text:
-                        apply_url = urls_in_text[0]
-
-            # Extract email for jobs that require email application
-            email_match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', clean_text)
-            if email_match:
-                apply_email = email_match.group(0)
-
-            job_id = hashlib.md5(hn_url.encode()).hexdigest()[:16]
-
-            job = Job(
-                id=f"hn_{job_id}",
-                title=title,
-                company=company,
-                location=location,
-                url=hn_url,
-                apply_url=apply_url,
-                platform="hackernews",
-                description=clean_text[:5000],
-                department="",
-                metadata={
-                    "source": "hackernews",
-                    "thread_title": thread_title,
-                    "date_posted": comment.get("created_at", ""),
-                    "apply_email": apply_email,
-                }
-            )
-            all_jobs.append(job)
-
-        print(f"  \U0001f4ca HN Who is Hiring: {len(all_jobs)} matching jobs")
-
+            job = parse_comment(comment, thread_title, keywords)
+            if job:
+                jobs.append(job)
+        print(f"  📊 HN Who is Hiring: {len(jobs)} matching jobs")
     except Exception as e:
-        print(f"  \u26a0 HN Who is Hiring failed: {e}")
-
-    return all_jobs
+        print(f"  ⚠ HN Who is Hiring failed: {e}")
+    return jobs

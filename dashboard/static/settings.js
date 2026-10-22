@@ -14,6 +14,10 @@ function settings() {
     schedule: { enabled: true, discover_interval_hours: 6, score_interval_minutes: 30 },
     email: { enabled: false, imap_server: "imap.gmail.com", email: "", app_password: "", check_interval_hours: 12 },
     common_answers: {},
+    offer: { enabled: false, services: [], engagement_types: ["fixed-scope", "retainer", "hourly"], rate_min: null, rate_max: null,
+             min_budget: null, availability: "", ideal_client: "", red_flags: ["equity only", "unpaid trial", "revenue share"],
+             case_studies: [], gig_queries: [], prospect_stacks: [], prospect_exclude: [], min_match_score: null,
+             sources: { hn_freelancer: true, jobspy_contract: true, boards_contract: true, prospects_from_jobs: true } },
   });
   const merge = (base, over) => {
     for (const [k, v] of Object.entries(over || {})) {
@@ -37,6 +41,7 @@ function settings() {
       this.saving = true;
       try {
         const body = JSON.parse(JSON.stringify(this.p));
+        for (const k of ["rate_min", "rate_max", "min_budget", "min_match_score"]) if (body.offer[k] === null || body.offer[k] === "") delete body.offer[k];
         await api.patch("/api/profile", body);
         this.dirty = false; this.needsSetup = false; toast("Saved");
       } finally { this.saving = false; }

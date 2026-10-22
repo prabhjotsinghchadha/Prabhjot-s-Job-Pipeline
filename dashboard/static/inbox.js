@@ -3,7 +3,9 @@
 function applyDrawer() {
   return {
     apply: { open: false, job: {}, mode: "manual", draft: null, kit: null, loading: false, loadingText: "",
-             error: "", sending: false, tailoring: false, resolving: false, writing: false, note: "", hasBuilder: true },
+             error: "", sending: false, tailoring: false, resolving: false, writing: false, note: "", channel: "LinkedIn", hasBuilder: true },
+    // A method, not a getter: inbox() spreads this object and a spread copies a getter's value once.
+    isLead() { return !!(this.apply.job && this.apply.job.kind === "lead"); },
     async openApply(job) {
       this.apply = { ...this.apply, open: true, job, draft: null, kit: null, error: "", note: "",
                      mode: job.apply_email ? "email" : "manual" };
@@ -20,7 +22,8 @@ function applyDrawer() {
     },
     async loadKit() {
       if (this.apply.kit) return;
-      this.apply.loading = true; this.apply.loadingText = "Preparing the apply kit (cover letter takes ~20s)…"; this.apply.error = "";
+      this.apply.loading = true; this.apply.error = "";
+      this.apply.loadingText = this.isLead() ? "Writing the pitch (~20s)…" : "Preparing the apply kit (cover letter takes ~20s)…";
       try { this.apply.kit = await api.post(`/api/jobs/${this.apply.job.id}/apply-kit`, {}, { quiet: true }); }
       catch (e) { this.apply.error = e.message; }
       this.apply.loading = false;
@@ -32,6 +35,20 @@ function applyDrawer() {
         if (r.url) this.apply.kit.apply_url = r.url;
         toast(r.status === "already_ats" ? "That is already the company's form" : r.error ? "Could not resolve: " + r.error : "Found: " + fmt.host(r.url));
       } finally { this.apply.resolving = false; }
+    },
+    async rewritePitch() {
+      this.apply.writing = true;
+      try {
+        const r = await api.post(`/api/jobs/${this.apply.job.id}/pitch`, { force: true });
+        if (this.apply.kit) this.apply.kit.pitch = { subject: r.subject, body: r.body };
+        if (this.apply.draft) { this.apply.draft.subject = r.subject; this.apply.draft.body = r.body; }
+      } finally { this.apply.writing = false; }
+    },
+    async markContacted() {
+      await api.post(`/api/jobs/${this.apply.job.id}/contacted`, { channel: this.apply.channel, note: this.apply.note });
+      toast("Marked as contacted. Follow-up in 3 days.");
+      this.afterApplied(this.apply.job);
+      this.closeApply();
     },
     async rewriteLetter() {
       this.apply.writing = true;
@@ -53,11 +70,11 @@ function applyDrawer() {
     },
     async sendEmail() {
       const d = this.apply.draft;
-      if (!confirm(`Send this application to ${d.to}?\n\nThis sends a real email from your account.`)) return;
+      if (!confirm(`Send this ${this.isLead() ? "pitch" : "application"} to ${d.to}?\n\nThis sends a real email from your account.`)) return;
       this.apply.sending = true;
       try {
         await api.post(`/api/jobs/${this.apply.job.id}/email-send`, { to: d.to, subject: d.subject, body: d.body });
-        toast("Sent. Moved to Applications.");
+        toast(this.isLead() ? "Sent. Lead moved to Contacted." : "Sent. Moved to Applications.");
         this.afterApplied(this.apply.job);
         this.closeApply();
       } finally { this.apply.sending = false; }
@@ -83,7 +100,7 @@ function inbox() {
     tab: "matched",
     jobs: [], total: 0, counts: {}, unscored: 0, search: "", loading: true,
     get subtitle() {
-      if (this.tab === "matched") return this.total ? `${this.total} to decide on, best first` : "";
+      if (this.tab === "matched") return this.total ? `${this.total} ${L.decide}` : "";
       return "";
     },
     async init() {

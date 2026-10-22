@@ -16,7 +16,8 @@ from fastapi import APIRouter, HTTPException
 from dashboard.routes import job_description, load_profile, require_job
 from utils.events import EventBus
 from utils.system_state import is_paused
-from utils.tracker import log_applied, update_apply_email, update_apply_url, update_cover_letter, update_job_notes
+from utils.tracker import (log_applied, update_apply_email, update_apply_url, update_cover_letter,
+                           update_job_notes, update_job_status)
 
 router = APIRouter(tags=["apply"])
 
@@ -41,10 +42,54 @@ async def _cover_letter(job: dict, profile: dict, force: bool = False) -> str:
     return letter
 
 
+async def _pitch(job: dict, profile: dict, force: bool = False) -> dict:
+    """Stored pitch (in cover_letter) or a fresh one from Claude. Returns {subject, body}."""
+    from utils.pipeline import _unpack_meta
+    _unpack_meta(job)
+    existing = (job.get("cover_letter") or "").strip()
+    if existing and not force:
+        return {"subject": _pitch_subject(job, profile), "body": existing}
+    pitch = await asyncio.to_thread(_brain(profile).write_pitch, job, profile)
+    update_cover_letter(job["id"], pitch["body"])
+    return pitch
+
+
+def _pitch_subject(job: dict, profile: dict) -> str:
+    services = (profile.get("offer") or {}).get("services") or []
+    first = services[0] if services else "senior engineering help"
+    return f"{first} for {job.get('company') or 'your team'}"[:70]
+
+
+@router.post("/jobs/{job_id}/pitch")
+async def pitch(job_id: str, body: dict = {}) -> dict:
+    """Write (or rewrite with {force: true}) the outreach pitch for a lead."""
+    job = require_job(job_id)
+    if job.get("kind") != "lead":
+        raise HTTPException(status_code=400, detail="Pitches are for leads; use cover-letter for jobs.")
+    return {"job_id": job_id, **(await _pitch(job, load_profile(), force=bool(body.get("force"))))}
+
+
+@router.post("/jobs/{job_id}/contacted")
+async def mark_contacted(job_id: str, body: dict = {}) -> dict:
+    """You reached out some other way (LinkedIn, form, call): record it. {channel?, note?}"""
+    job = require_job(job_id)
+    if job.get("kind") != "lead":
+        raise HTTPException(status_code=400, detail="Only leads can be marked contacted.")
+    update_job_status(job_id, "contacted")
+    note = f"Contacted via {body.get('channel') or 'other'} on {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    if body.get("note"):
+        note += f": {body['note']}"
+    update_job_notes(job_id, f"{(job.get('notes') or '').strip()}\n{note}".strip())
+    return require_job(job_id)
+
+
 @router.post("/jobs/{job_id}/cover-letter")
 async def cover_letter(job_id: str, body: dict = {}) -> dict:
     """Write (or rewrite with {force: true}) the cover letter for one job."""
     job = require_job(job_id)
+    if job.get("kind") == "lead":
+        p = await _pitch(job, load_profile(), force=bool(body.get("force")))
+        return {"job_id": job_id, "cover_letter": p["body"]}
     letter = await _cover_letter(job, load_profile(), force=bool(body.get("force")))
     if not letter:
         raise HTTPException(status_code=502, detail="Claude returned an empty cover letter")
@@ -88,6 +133,8 @@ async def apply_kit(job_id: str, body: dict = {}) -> dict:
     """
     job = require_job(job_id)
     profile = load_profile()
+    if job.get("kind") == "lead":
+        return await _outreach_kit(job, profile)
     if body.get("resolve"):
         await resolve_url(job_id)
         job = require_job(job_id)
@@ -110,6 +157,43 @@ async def apply_kit(job_id: str, body: dict = {}) -> dict:
         "cover_letter": letter,
         "resume_path": resume,
         "resume_tailored": bool(resume and "tailored" in str(resume)),
+    }
+
+
+async def _outreach_kit(job: dict, profile: dict) -> dict:
+    """Everything needed to pitch a lead by hand: the pitch, contact channels, case studies."""
+    from urllib.parse import quote_plus
+    from utils.pipeline import _unpack_meta
+    _unpack_meta(job)
+    pitch = {"subject": _pitch_subject(job, profile), "body": (job.get("cover_letter") or "").strip()}
+    if not pitch["body"] and not is_paused():
+        try:
+            pitch = await _pitch(job, profile)
+        except Exception as exc:
+            pitch = {"subject": "", "body": f"(pitch failed: {exc})"}
+    company = job.get("company") or ""
+    channels = []
+    if job.get("apply_email"):
+        channels.append({"label": "Email", "value": job["apply_email"], "href": f"mailto:{job['apply_email']}"})
+    if job.get("apply_url") or job.get("url"):
+        channels.append({"label": "Posting / careers page", "value": job.get("apply_url") or job.get("url"),
+                         "href": job.get("apply_url") or job.get("url")})
+    if company and company.lower() != "unknown":
+        li_query = quote_plus(f'{company} founder OR CTO OR "head of engineering"')
+        channels.append({"label": "LinkedIn people", "value": f"{company} founders / CTO",
+                         "href": f"https://www.linkedin.com/search/results/people/?keywords={li_query}"})
+        channels.append({"label": "Company search", "value": company,
+                         "href": f"https://www.google.com/search?q={quote_plus(company)}"})
+    offer = profile.get("offer") or {}
+    personal = profile.get("personal", {})
+    return {
+        "job": job,
+        "kind": "lead",
+        "pitch": pitch,
+        "pitch_angle": job.get("pitch_angle", ""),
+        "channels": channels,
+        "case_studies": offer.get("case_studies") or [],
+        "contact": {k: personal.get(k, "") for k in ("email", "phone", "linkedin", "portfolio")},
     }
 
 
@@ -158,11 +242,20 @@ async def email_draft(job_id: str) -> dict:
     job = require_job(job_id)
     to = job.get("apply_email") or extract_apply_email(job.get("description") or "") or ""
     if not to:
-        raise HTTPException(status_code=400, detail="No application email in this posting. Use the apply kit instead.")
+        raise HTTPException(status_code=400, detail="No email address for this one. Use the kit instead.")
     if to != job.get("apply_email"):
         update_apply_email(job_id, to)
         job["apply_email"] = to
     profile = load_profile()
+    if job.get("kind") == "lead":
+        if is_paused() and not (job.get("cover_letter") or "").strip():
+            raise HTTPException(status_code=409, detail="Paused. Resume to let Claude write the pitch.")
+        p = await _pitch(job, profile)
+        personal = profile.get("personal", {})
+        sig = f"{personal.get('first_name', '')} {personal.get('last_name', '')}".strip()
+        body = p["body"] if sig.lower() in p["body"][-120:].lower() else f"{p['body']}\n\n{sig}"
+        return {"job_id": job_id, "title": job.get("title"), "company": job.get("company"), "kind": "lead",
+                "to": to, "subject": p["subject"], "body": body, "resume": ""}
     # Stored letter -> no tokens. Otherwise Claude writes the body, unless paused (plain template then).
     brain = None if ((job.get("cover_letter") or "").strip() or is_paused()) else _brain(profile)
     draft = await asyncio.to_thread(compose_application_email, job, profile, brain)
@@ -180,18 +273,25 @@ async def email_send(job_id: str, body: dict) -> dict:
     if not (to and subject and text):
         raise HTTPException(status_code=400, detail="to, subject and body are required")
     profile = load_profile()
+    is_lead = job.get("kind") == "lead"
     try:
         smtp_config(profile)
-        from utils.resume_builder import resume_path_for_job
-        resume = await asyncio.to_thread(resume_path_for_job, profile, job)
+        resume = ""
+        if not is_lead:
+            from utils.resume_builder import resume_path_for_job
+            resume = await asyncio.to_thread(resume_path_for_job, profile, job)
         await asyncio.to_thread(send_application_email, profile, to, subject, text,
                                 resume if resume and Path(resume).exists() else "")
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Send failed: {e}")
-    log_applied(job_id, True)
-    note = f"Applied by email to {to} on {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    if is_lead:
+        update_job_status(job_id, "contacted")
+        note = f"Pitched by email to {to} on {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    else:
+        log_applied(job_id, True)
+        note = f"Applied by email to {to} on {datetime.now().strftime('%Y-%m-%d %H:%M')}"
     update_job_notes(job_id, f"{(job.get('notes') or '').strip()}\n{note}".strip())
     EventBus.emit("email_sent", {"job_id": job_id, "to": to, "title": job.get("title"), "company": job.get("company")})
     return {"status": "sent", "job_id": job_id, "to": to}

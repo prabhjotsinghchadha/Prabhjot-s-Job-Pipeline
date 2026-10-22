@@ -325,18 +325,25 @@ RULES = [
     _rule_stale,
 ]
 
+# Leads (clients mode): no title/seniority gates — a gig is a gig.
+LEAD_RULES = [
+    _rule_excluded_company,
+    _rule_remote,
+    _rule_stale,
+]
+
 
 # --------------------------------------------------------------------------
 # Public API
 # --------------------------------------------------------------------------
 
-def prefilter_reason(job: Any, profile: dict) -> Optional[str]:
+def prefilter_reason(job: Any, profile: dict, kind: str = "job") -> Optional[str]:
     """Reason this job should NOT be sent to AI scoring, or None to score it."""
     cfg = _cfg(profile)
     if not cfg.get("enabled", True):
         return None
     j = job_to_dict(job)
-    for rule in RULES:
+    for rule in (LEAD_RULES if kind == "lead" else RULES):
         try:
             reason = rule(j, profile, cfg)
         except Exception:
@@ -351,7 +358,8 @@ def reason_key(reason: str) -> str:
     return re.sub(r"\s*\(.*$", "", reason).strip()
 
 
-def run_prefilter(profile: dict, jobs: Optional[list] = None, dry_run: bool = False) -> dict:
+def run_prefilter(profile: dict, jobs: Optional[list] = None, dry_run: bool = False,
+                  kind: str = "job") -> dict:
     """
     Skip every unscored job that fails a rule. Returns
     {"enabled", "checked", "skipped", "kept", "reasons": {bucket: n}, "samples": [...]}.
@@ -366,12 +374,12 @@ def run_prefilter(profile: dict, jobs: Optional[list] = None, dry_run: bool = Fa
 
     if jobs is None:
         from utils.tracker import get_unscored_jobs
-        jobs = get_unscored_jobs()
+        jobs = get_unscored_jobs(kind)
 
     for job in jobs:
         j = job_to_dict(job)
         summary["checked"] += 1
-        reason = prefilter_reason(j, profile)
+        reason = prefilter_reason(j, profile, kind)
         if not reason:
             summary["kept"] += 1
             continue

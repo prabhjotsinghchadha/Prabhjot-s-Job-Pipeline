@@ -2,10 +2,10 @@
 {% block content %}
 <div x-data="applications()" x-init="init()">
   <div class="page-head">
-    <h1>Applications</h1>
+    <h1 x-text="L.tracking">Applications</h1>
     <span class="muted" x-text="total ? total + ' tracked' : ''"></span>
     <span class="spacer"></span>
-    <button class="btn sm" @click="checkEmail()" :disabled="checking" title="Read your inbox for rejections and interview invites">
+    <button class="btn sm" x-show="MODE === 'job'" @click="checkEmail()" :disabled="checking" title="Read your inbox for rejections and interview invites">
       <span class="spin" x-show="checking" x-cloak></span> Check email for updates
     </button>
   </div>
@@ -22,9 +22,9 @@
     </template>
     <template x-for="j in followUps.ghosts" :key="'g' + j.id">
       <div class="row small" style="margin-bottom:.4rem">
-        <span><strong x-text="j.title"></strong> at <span x-text="j.company"></span> — no reply in 14+ days</span>
+        <span><strong x-text="j.title"></strong> at <span x-text="j.company"></span> — no reply in <span x-text="MODE === 'lead' ? '10' : '14'"></span>+ days</span>
         <span class="spacer"></span>
-        <button class="btn sm" @click="setStatus(j, 'rejected')">Mark rejected</button>
+        <button class="btn sm" @click="setStatus(j, MODE === 'lead' ? 'lost' : 'rejected')" x-text="MODE === 'lead' ? 'Mark lost' : 'Mark rejected'"></button>
         <button class="btn sm link" @click="setStatus(j, 'archived')">Archive</button>
       </div>
     </template>
@@ -37,8 +37,8 @@
   </div>
 
   <div class="empty" x-show="!loading && !(groups[tab] || []).length" x-cloak>
-    <h2 x-text="tab === 'applied' ? 'No applications yet' : 'Nothing here'"></h2>
-    <p x-show="tab === 'applied'">Apply to something from the <a href="/">Inbox</a> and it shows up here.</p>
+    <h2 x-text="tab === first ? (MODE === 'lead' ? 'No leads contacted yet' : 'No applications yet') : 'Nothing here'"></h2>
+    <p x-show="tab === first" x-text="MODE === 'lead' ? 'Pitch a lead from the Leads screen and it shows up here.' : 'Apply to something from the Inbox and it shows up here.'"></p>
   </div>
 
   <template x-for="job in (groups[tab] || [])" :key="job.id">
@@ -50,8 +50,9 @@
           <div class="meta">
             <span x-text="job.company"></span>
             <span x-show="job.location"> · <span x-text="job.location"></span></span>
-            <span x-show="job.applied_at"> · applied <span x-text="fmt.date(job.applied_at)"></span></span>
-            <span x-show="job.follow_up_date && tab==='applied'"> · follow up <span x-text="fmt.date(job.follow_up_date)"></span></span>
+            <span x-show="job.applied_at"> · <span x-text="MODE === 'lead' ? 'contacted' : 'applied'"></span> <span x-text="fmt.date(job.applied_at)"></span></span>
+            <span x-show="job.follow_up_date && ['applied','contacted','proposal'].includes(tab)"> · follow up <span x-text="fmt.date(job.follow_up_date)"></span></span>
+            <span class="chip" x-show="job.lead_type" x-text="job.lead_type"></span>
           </div>
           <div class="small" style="margin-top:.4rem">
             <button class="btn link sm" @click="job._notes = !job._notes" x-text="job._notes ? 'Hide notes' : (job.notes ? 'Notes' : 'Add note')"></button>

@@ -1,4 +1,4 @@
-<!-- Apply drawer: used by Inbox and Applications. Expects `apply` state from applyDrawer() mixed into the page component. -->
+<!-- Apply / Pitch drawer. Branches on apply.job.kind: job → apply kit, lead → outreach kit. -->
 <template x-if="apply.open">
   <div>
     <div class="drawer-backdrop" @click="closeApply()"></div>
@@ -9,33 +9,34 @@
 
       <div class="tabs" x-show="apply.job.apply_email">
         <button :class="{active: apply.mode==='email'}" @click="apply.mode='email'; loadDraft()">By email</button>
-        <button :class="{active: apply.mode==='manual'}" @click="apply.mode='manual'; loadKit()">On their site</button>
+        <button :class="{active: apply.mode==='manual'}" @click="apply.mode='manual'; loadKit()" x-text="isLead() ? 'Other channels' : 'On their site'"></button>
       </div>
 
       <div x-show="apply.loading" class="muted"><span class="spin"></span> <span x-text="apply.loadingText"></span></div>
       <div x-show="apply.error" class="chip bad" x-text="apply.error" style="white-space:normal;display:block"></div>
 
-      <!-- EMAIL -->
+      <!-- EMAIL (jobs and leads) -->
       <template x-if="apply.mode==='email' && apply.draft">
       <div class="stack">
         <label class="field"><span>To</span><input type="email" x-model="apply.draft.to"></label>
         <label class="field"><span>Subject</span><input type="text" x-model="apply.draft.subject"></label>
         <label class="field"><span>Body</span><textarea style="min-height:280px" x-model="apply.draft.body"></textarea></label>
-        <p class="small muted">Attached: <span class="mono" x-text="apply.draft.resume ? apply.draft.resume.split('/').pop() : 'no resume on file'"></span>
+        <p class="small muted" x-show="!isLead()">Attached: <span class="mono" x-text="apply.draft.resume ? apply.draft.resume.split('/').pop() : 'no resume on file'"></span>
           <span x-show="apply.draft.resume && apply.draft.resume.includes('tailored')" class="chip good">tailored</span></p>
         <div class="btn-row">
           <button class="btn primary" @click="sendEmail()" :disabled="apply.sending">
-            <span class="spin" x-show="apply.sending" x-cloak></span> Send application
+            <span class="spin" x-show="apply.sending" x-cloak></span> <span x-text="isLead() ? 'Send pitch' : 'Send application'"></span>
           </button>
-          <button class="btn" @click="tailor()" :disabled="apply.tailoring"><span class="spin" x-show="apply.tailoring" x-cloak></span> Tailor resume first</button>
+          <button class="btn" x-show="!isLead()" @click="tailor()" :disabled="apply.tailoring"><span class="spin" x-show="apply.tailoring" x-cloak></span> Tailor resume first</button>
+          <button class="btn" x-show="isLead()" @click="rewritePitch()" :disabled="apply.writing"><span class="spin" x-show="apply.writing" x-cloak></span> Rewrite pitch</button>
           <button class="btn" @click="skipFromDrawer()">Skip</button>
         </div>
-        <p class="tiny muted">Nothing is sent until you press Send. The email goes from your own account with the resume attached.</p>
+        <p class="tiny muted" x-text="isLead() ? 'Nothing is sent until you press Send. It goes from your own account; the lead moves to Contacted with a 3-day follow-up.' : 'Nothing is sent until you press Send. The email goes from your own account with the resume attached.'"></p>
       </div>
       </template>
 
-      <!-- MANUAL -->
-      <template x-if="apply.mode==='manual' && apply.kit">
+      <!-- JOB: apply on their site -->
+      <template x-if="apply.mode==='manual' && apply.kit && !isLead()">
       <div class="stack">
         <div class="btn-row">
           <a class="btn primary" :href="apply.kit.apply_url" target="_blank" rel="noopener">Open application page ↗</a>
@@ -78,6 +79,50 @@
         <label class="field"><span>Note (optional)</span><input type="text" x-model="apply.note" placeholder="e.g. applied via LinkedIn Easy Apply"></label>
         <div class="btn-row">
           <button class="btn primary" @click="markApplied()">Mark as applied</button>
+          <button class="btn" @click="skipFromDrawer()">Skip</button>
+        </div>
+      </div>
+      </template>
+
+      <!-- LEAD: pitch through other channels -->
+      <template x-if="apply.mode==='manual' && apply.kit && isLead()">
+      <div class="stack">
+        <div class="angle small" x-show="apply.kit.pitch_angle" x-text="'Angle: ' + apply.kit.pitch_angle"></div>
+
+        <h3>Pitch</h3>
+        <div class="copy-block" x-show="apply.kit.pitch.subject">
+          <div class="k">Subject</div><div class="v" x-text="apply.kit.pitch.subject"></div>
+          <button class="btn sm" @click="copyText(apply.kit.pitch.subject)">Copy</button>
+        </div>
+        <div class="copy-block">
+          <div class="v" x-text="apply.kit.pitch.body || '(none yet)'"></div>
+          <button class="btn sm" @click="copyText(apply.kit.pitch.body)">Copy</button>
+        </div>
+        <button class="btn link sm" @click="rewritePitch()" :disabled="apply.writing"><span class="spin" x-show="apply.writing" x-cloak></span> Rewrite</button>
+
+        <h3>Where to reach them</h3>
+        <template x-for="c in apply.kit.channels" :key="c.label">
+          <div class="copy-block">
+            <div class="k" x-text="c.label"></div>
+            <div class="v"><a :href="c.href" target="_blank" rel="noopener" x-text="c.value"></a></div>
+            <button class="btn sm" @click="copyText(c.value)">Copy</button>
+          </div>
+        </template>
+
+        <h3 x-show="apply.kit.case_studies.length">Proof points</h3>
+        <template x-for="cs in apply.kit.case_studies" :key="cs.name">
+          <div class="copy-block"><div class="k" x-text="cs.name"></div><div class="v" x-text="cs.outcome"></div>
+            <button class="btn sm" @click="copyText(cs.name + ': ' + cs.outcome + (cs.url ? ' ' + cs.url : ''))">Copy</button></div>
+        </template>
+
+        <hr>
+        <div class="grid-2">
+          <label class="field"><span>Channel used</span>
+            <select x-model="apply.channel"><option>LinkedIn</option><option>Email</option><option>Contact form</option><option>Call</option><option>Other</option></select></label>
+          <label class="field"><span>Note (optional)</span><input type="text" x-model="apply.note" placeholder="who you wrote to"></label>
+        </div>
+        <div class="btn-row">
+          <button class="btn primary" @click="markContacted()">Mark as contacted</button>
           <button class="btn" @click="skipFromDrawer()">Skip</button>
         </div>
       </div>

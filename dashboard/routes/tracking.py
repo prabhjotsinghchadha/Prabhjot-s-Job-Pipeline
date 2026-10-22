@@ -4,7 +4,7 @@ import asyncio
 
 from fastapi import APIRouter
 
-from dashboard.routes import load_profile, require_job
+from dashboard.routes import load_profile, require_job, valid_kind
 from utils import pipeline
 from utils.tracker import dismiss_follow_up, get_ghost_alerts, get_overdue_follow_ups, increment_follow_up
 
@@ -12,8 +12,9 @@ router = APIRouter(tags=["tracking"])
 
 
 @router.get("/follow-ups")
-async def follow_ups() -> dict:
-    return {"overdue": get_overdue_follow_ups(), "ghosts": get_ghost_alerts(days=14)}
+async def follow_ups(kind: str = "job") -> dict:
+    kind = valid_kind(kind)
+    return {"overdue": get_overdue_follow_ups(kind), "ghosts": get_ghost_alerts(days=14 if kind == "job" else 10, kind=kind)}
 
 
 @router.post("/jobs/{job_id}/follow-up")

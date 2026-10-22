@@ -27,5 +27,10 @@ def require_job(job_id: str) -> dict:
     return job
 
 
+def valid_kind(kind: str) -> str:
+    from utils.tracker import KINDS
+    return kind if kind in KINDS else "job"
+
+
 def job_description(job: dict) -> str:
     return job.get("description") or f"Job: {job.get('title')} at {job.get('company')}. Location: {job.get('location', '')}"

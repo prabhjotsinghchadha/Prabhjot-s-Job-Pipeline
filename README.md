@@ -1,22 +1,29 @@
 # Pipeline
 
-A local job-search pipeline. It finds postings from a dozen sources, scores
-them against your profile with Claude, and gives you one screen to decide on
-each one. You apply; it keeps track.
+A local pipeline for finding work, in two modes that share one app:
+
+- **Jobs**: find postings from a dozen sources, score them against your
+  profile with Claude, decide in the Inbox, apply, track.
+- **Clients**: find contract gigs and companies that might buy your services,
+  score them against your offer, pitch, track the deal.
 
 ```
-Find (13 sources)  →  Prefilter (0 tokens)  →  Score (10 jobs per Claude call)
-        →  Inbox: Apply / Save / Skip  →  Applications: Applied → Interviewing → Offer
+Jobs     Find (13 sources) → Prefilter (0 tokens) → Score (10 per Claude call)
+         → Inbox: Apply / Save / Skip → Applications: Applied → Interviewing → Offer
+
+Clients  Find (gig boards + prospects from your own jobs data) → Prefilter → Score
+         → Leads: Pitch / Save / Skip → Pipeline: Contacted → Call → Proposal → Won / Lost
 ```
 
-Nothing is ever sent or submitted without you pressing the button.
+Switch with the **Jobs | Clients** control in the top bar. Nothing is ever
+sent or submitted without you pressing the button, in either mode.
 
 ## Screens
 
 | Screen | What it is for |
 |---|---|
-| **Inbox** (`/`) | Scored jobs above your threshold, best first. Apply, Save for later, or Skip. |
-| **Applications** (`/applications`) | Everything you applied to, by stage. Follow-up reminders, ghost alerts, notes. |
+| **Inbox / Leads** (`/`) | Scored jobs (or leads) above your threshold, best first. Apply (or Pitch), Save for later, or Skip. |
+| **Applications / Pipeline** (`/applications`) | Everything you applied to (or pitched), by stage. Follow-up reminders, ghost alerts, notes. |
 | **Resume** (`/resume`) | Structured resume builder → ATS-friendly PDF/DOCX. Per-job tailoring. ATS check. |
 | **Settings** (`/settings`) | Who you are, what you want, where to look, schedule, email. Edits `profile.yaml`. |
 
@@ -35,6 +42,28 @@ Press **Apply** on an Inbox card:
   are resolved to the company's form), a cover letter, your contact details and
   common answers with copy buttons, and the tailored resume to download. You
   fill the form in your browser and press **Mark as applied**.
+
+### Clients mode
+
+Fill in **Settings → Clients**: what you sell, engagement types, rates and
+minimum budget, ideal client, red flags, proof points, gig search queries and
+the stacks that make a company a prospect. Then switch to Clients and press
+**Find clients**. Leads come from:
+
+- the monthly HN "Freelancer? Seeking freelancer?" thread,
+- Indeed / LinkedIn searched with `job_type=contract` and your gig queries,
+- contract-looking postings on the regular boards (title, tags or employment type),
+- **prospects**: companies already in your jobs data that are hiring in your
+  stack. No network; built from what discovery already found.
+
+Claude scores each lead against the offer (budget fit, engagement type, a
+one-line pitch angle). **Pitch** opens the same drawer as Apply: an email
+draft you review and send when there is an address, or the pitch to copy
+plus contact channels (posting, LinkedIn people search, company search) and
+**Mark as contacted**. Contacted leads get a 3-day follow-up, proposals 5 days.
+
+Set `offer.enabled: true` to include clients in the scheduled runs; otherwise
+they only run when you press the button.
 
 ## Quick start
 
@@ -77,7 +106,8 @@ dashboard/
   templates/         base + one HTML file per screen (Jinja + Alpine.js, no build step)
   static/            app.css (theme), common.js (top bar, API, WebSocket), one JS per screen
 utils/
-  pipeline.py        the one code path: run_discovery, run_scoring (batched), email, follow-ups
+  pipeline.py        the one code path: run_discovery, run_lead_discovery, run_scoring (batched), email, follow-ups
+  leads.py           clients mode: contract classifier, gig sources, prospects from the jobs DB
   discovery.py       source registry + Greenhouse/Lever; other sources in *_source.py
   prefilter.py       zero-token rules (remote, location, seniority, title, age)
   brain.py           Claude CLI calls: match_jobs (batch), match_job, write_cover_letter
@@ -93,8 +123,10 @@ profile.yaml         your configuration (gitignored). See profile.yaml.example.
 applications.db      SQLite, gitignored.
 ```
 
-Statuses: `discovered → matched | skipped`, then `saved`, `applied`,
-`interviewing`, `offer`, `rejected`, `archived`.
+Every row has `kind` = `job` or `lead`. Stages:
+
+- job: `discovered → matched | skipped`, then `saved`, `applied`, `interviewing`, `offer`, `rejected`, `archived`
+- lead: `discovered → matched | skipped`, then `saved`, `contacted`, `call`, `proposal`, `won`, `lost`, `archived`
 
 ### Sources
 
@@ -113,7 +145,8 @@ at a time; each gets a 0–100 score and a one-line reason. Jobs at or above
 
 ## API
 
-All under `/api`. The dashboard uses only these.
+All under `/api`. Every list, stats and action endpoint takes `kind=job|lead`
+(default job); the dashboard adds it from the current mode.
 
 ```
 GET   /jobs?status=matched,saved&min_score=&search=&sort_by=&limit=&offset=
@@ -122,6 +155,7 @@ POST  /jobs/{id}/skip   POST /jobs/{id}/save   POST /jobs/{id}/score   POST /job
 POST  /discover         POST /score            POST /prefilter {dry_run}   GET /sources   POST /ingest {jobs}
 POST  /jobs/{id}/apply-kit   POST /jobs/{id}/applied   POST /jobs/{id}/cover-letter   POST /jobs/{id}/resolve-url
 POST  /jobs/{id}/email-draft POST /jobs/{id}/email-send {to,subject,body}   GET /email/config   POST /email/test
+POST  /jobs/{id}/pitch {force?}   POST /jobs/{id}/contacted {channel,note}     (leads; apply-kit returns the outreach kit)
 GET   /resume/build?format=pdf|docx|txt[&job_id=]   GET /resume/ats[?job_id=]   POST /resume/import   POST /resume/save-as
 GET   /jobs/{id}/tailor      POST /jobs/{id}/tailor   GET /resume/tailored   GET|POST /resumes   DELETE /resumes/{name}
 GET   /follow-ups       POST /jobs/{id}/follow-up   POST /jobs/{id}/dismiss-follow-up   POST /check-email
