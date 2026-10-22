@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }} · Pipeline</title>
+  <script>try{var t=localStorage.getItem("theme");if(t&&t!=="system")document.documentElement.dataset.theme=t;}catch(e){}</script>
+  <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
+  <script src="/static/common.js?v={{ asset_v }}"></script>
+  <script defer src="/static/{{ screen }}.js?v={{ asset_v }}"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+</head>
+<body>
+  <header class="topbar" x-data="shell()" x-init="init()">
+    <div class="topbar-inner">
+      <a class="brand" href="/">Pipeline</a>
+      <nav class="nav">
+        <a href="/" class="{{ 'active' if screen == 'inbox' else '' }}">Inbox</a>
+        <a href="/applications" class="{{ 'active' if screen == 'applications' else '' }}">Applications</a>
+        <a href="/resume" class="{{ 'active' if screen == 'resume' else '' }}">Resume</a>
+        <a href="/settings" class="{{ 'active' if screen == 'settings' else '' }}">Settings</a>
+      </nav>
+      <div class="topbar-actions">
+        <span class="small muted" x-cloak x-show="progress" x-text="progress"></span>
+        <span class="small muted" x-cloak x-show="!progress && unscored" x-text="unscored + ' unscored'"></span>
+        <button class="btn sm" @click="findJobs()" :disabled="busyDiscover || paused">
+          <span class="spin" x-show="busyDiscover" x-cloak></span> Find jobs
+        </button>
+        <button class="btn sm" @click="scoreJobs()" :disabled="busyScore || paused || !unscored">
+          <span class="spin" x-show="busyScore" x-cloak></span> Score
+        </button>
+        <select class="theme-select" x-model="theme" @change="setTheme(theme)" title="Theme">
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+          <option value="gruvbox-light">Gruvbox light</option>
+          <option value="gruvbox-dark">Gruvbox dark</option>
+        </select>
+        <button class="btn sm" @click="togglePause()" :title="paused ? 'Automation is paused' : 'Stop all automation and Claude usage'">
+          <span class="status-dot" :class="paused ? 'paused' : (sched.running ? '' : 'off')"></span>
+          <span x-text="paused ? 'Resume' : 'Pause'"></span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    {% if not has_profile and screen != 'settings' %}
+    <div class="card" style="border-color: var(--accent)">
+      <strong>Welcome.</strong> Fill in <a href="/settings">Settings</a> first: your name, email and the roles you want. Then press <em>Find jobs</em>.
+    </div>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+
+  <div id="toast" class="toast" style="display:none"></div>
+</body>
+</html>

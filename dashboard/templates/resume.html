@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% block content %}
+<div x-data="resume()" x-init="init()">
+  <div class="page-head">
+    <h1>Resume</h1>
+    <span class="spacer"></span>
+    <div class="btn-row">
+      <a class="btn sm" href="/api/resume/build?format=pdf" :class="{disabled: !hasBuilder}">Download PDF</a>
+      <a class="btn sm" href="/api/resume/build?format=docx">Download DOCX</a>
+      <button class="btn sm" @click="ats()" :disabled="atsBusy"><span class="spin" x-show="atsBusy" x-cloak></span> ATS check</button>
+      <button class="btn primary sm" @click="save()" :disabled="saving || !dirty"><span class="spin" x-show="saving" x-cloak></span> <span x-text="dirty ? 'Save changes' : 'Saved'"></span></button>
+    </div>
+  </div>
+
+  <div class="card" x-show="atsReport" x-cloak>
+    <div class="card-head"><h2>ATS check</h2><span class="chip" :class="fmt.scoreClass(atsReport?.score)" x-text="(atsReport?.score ?? '?') + ' / 100'"></span>
+      <span class="spacer"></span><button class="btn link sm" @click="atsReport=null">Close</button></div>
+    <div class="small" x-show="atsReport?.missing_keywords?.length"><strong>Missing keywords:</strong> <span x-text="(atsReport?.missing_keywords || []).join(', ')"></span></div>
+    <div class="small" x-show="atsReport?.issues?.length"><strong>Format issues:</strong> <span x-text="(atsReport?.issues || []).join('; ')"></span></div>
+    <div class="small muted" x-show="!atsReport?.missing_keywords?.length && !atsReport?.issues?.length">Looks clean.</div>
+  </div>
+
+  <div class="grid-2">
+    <!-- LEFT: builder -->
+    <div>
+      <div class="card">
+        <div class="card-head"><h2>Resume builder</h2><span class="spacer"></span>
+          <button class="btn link sm" @click="importPdf()" :disabled="importing" title="Have Claude transcribe your uploaded PDF into these fields"><span class="spin" x-show="importing" x-cloak></span> Import from PDF</button></div>
+        <p class="tiny muted">This is the source of truth. PDF and DOCX downloads, ATS checks and per-job tailoring all come from these fields. Nothing here is invented: tailoring only rephrases what you wrote.</p>
+
+        <label class="field"><span>Headline</span><input type="text" x-model="r.headline" @input="dirty=true"></label>
+        <label class="field"><span>Summary</span><textarea x-model="r.summary" @input="dirty=true"></textarea></label>
+
+        <h3>Skills</h3>
+        <template x-for="(g, i) in r.skills" :key="'s'+i">
+          <div class="row" style="margin-bottom:.5rem; align-items:flex-start">
+            <input type="text" x-model="g.category" @input="dirty=true" placeholder="Group" style="max-width:180px">
+            <input type="text" :value="g.items.join(', ')" @change="g.items = fmt.toList($event.target.value); dirty=true" placeholder="Comma-separated skills">
+            <button class="btn sm link danger" @click="r.skills.splice(i,1); dirty=true">×</button>
+          </div>
+        </template>
+        <button class="btn sm" @click="r.skills.push({category:'', items:[]}); dirty=true">+ Skill group</button>
+
+        <h3 style="margin-top:1.25rem">Experience</h3>
+        <template x-for="(e, i) in r.experience" :key="'e'+i">
+          <div class="card flat" style="background:var(--surface-2)">
+            <div class="grid-2">
+              <label class="field"><span>Company</span><input type="text" x-model="e.company" @input="dirty=true"></label>
+              <label class="field"><span>Title</span><input type="text" x-model="e.title" @input="dirty=true"></label>
+            </div>
+            <div class="grid-3">
+              <label class="field"><span>Location</span><input type="text" x-model="e.location" @input="dirty=true"></label>
+              <label class="field"><span>Start</span><input type="text" x-model="e.start" @input="dirty=true" placeholder="Jan 2022"></label>
+              <label class="field"><span>End</span><input type="text" x-model="e.end" @input="dirty=true" placeholder="Present"></label>
+            </div>
+            <label class="field"><span>One line about the company (optional)</span><input type="text" x-model="e.tagline" @input="dirty=true"></label>
+            <label class="field"><span>Bullets, one per line</span><textarea :value="e.bullets.join('\n')" @change="e.bullets = fmt.lines($event.target.value); dirty=true" style="min-height:120px"></textarea></label>
+            <button class="btn sm link danger" @click="r.experience.splice(i,1); dirty=true">Remove role</button>
+          </div>
+        </template>
+        <button class="btn sm" @click="r.experience.push({company:'',title:'',location:'',start:'',end:'Present',tagline:'',bullets:[]}); dirty=true">+ Role</button>
+
+        <h3 style="margin-top:1.25rem">Education</h3>
+        <template x-for="(e, i) in r.education" :key="'d'+i">
+          <div class="card flat" style="background:var(--surface-2)">
+            <div class="grid-2">
+              <label class="field"><span>Degree</span><input type="text" x-model="e.degree" @input="dirty=true"></label>
+              <label class="field"><span>School</span><input type="text" x-model="e.school" @input="dirty=true"></label>
+            </div>
+            <div class="grid-3">
+              <label class="field"><span>Location</span><input type="text" x-model="e.location" @input="dirty=true"></label>
+              <label class="field"><span>Start</span><input type="text" x-model="e.start" @input="dirty=true"></label>
+              <label class="field"><span>End</span><input type="text" x-model="e.end" @input="dirty=true"></label>
+            </div>
+            <label class="field"><span>Details (optional)</span><input type="text" x-model="e.details" @input="dirty=true"></label>
+            <button class="btn sm link danger" @click="r.education.splice(i,1); dirty=true">Remove</button>
+          </div>
+        </template>
+        <button class="btn sm" @click="r.education.push({degree:'',school:'',location:'',start:'',end:'',details:''}); dirty=true">+ Degree</button>
+
+        <h3 style="margin-top:1.25rem">Projects</h3>
+        <template x-for="(p, i) in r.projects" :key="'p'+i">
+          <div class="card flat" style="background:var(--surface-2)">
+            <div class="grid-2">
+              <label class="field"><span>Name</span><input type="text" x-model="p.name" @input="dirty=true"></label>
+              <label class="field"><span>URL</span><input type="url" x-model="p.url" @input="dirty=true"></label>
+            </div>
+            <label class="field"><span>Description</span><input type="text" x-model="p.description" @input="dirty=true"></label>
+            <label class="field"><span>Tech, comma-separated</span><input type="text" :value="(p.tech||[]).join(', ')" @change="p.tech = fmt.toList($event.target.value); dirty=true"></label>
+            <label class="field"><span>Bullets, one per line</span><textarea :value="(p.bullets||[]).join('\n')" @change="p.bullets = fmt.lines($event.target.value); dirty=true"></textarea></label>
+            <button class="btn sm link danger" @click="r.projects.splice(i,1); dirty=true">Remove</button>
+          </div>
+        </template>
+        <button class="btn sm" @click="r.projects.push({name:'',url:'',description:'',tech:[],bullets:[]}); dirty=true">+ Project</button>
+
+        <h3 style="margin-top:1.25rem">Certifications, awards, languages</h3>
+        <label class="field"><span>Certifications, one per line as “Name — Issuer — Year”</span>
+          <textarea :value="certText" @change="setCerts($event.target.value)"></textarea></label>
+        <label class="field"><span>Awards, one per line</span><textarea :value="(r.awards||[]).join('\n')" @change="r.awards = fmt.lines($event.target.value); dirty=true"></textarea></label>
+        <label class="field"><span>Languages, comma-separated</span><input type="text" :value="(r.languages||[]).join(', ')" @change="r.languages = fmt.toList($event.target.value); dirty=true"></label>
+        <label class="check"><input type="checkbox" x-model="r.use_tailored_when_applying" @change="dirty=true"> Attach the tailored version when applying (when one exists)</label>
+      </div>
+    </div>
+
+    <!-- RIGHT: files + tailored + custom -->
+    <div>
+      <div class="card">
+        <div class="card-head"><h2>Uploaded PDFs</h2></div>
+        <p class="tiny muted">The default PDF is what gets attached when no builder content or tailoring exists, and what <em>Import from PDF</em> reads.</p>
+        <template x-for="f in files" :key="f.name">
+          <div class="row small" style="margin-bottom:.4rem">
+            <span><strong x-text="f.name"></strong> <span class="chip good" x-show="f.is_default">default</span> <span class="chip" x-show="f.built">built</span></span>
+            <span class="spacer"></span>
+            <a class="btn sm link" :href="'/api/resumes/' + encodeURIComponent(f.name) + '/download'">Download</a>
+            <button class="btn sm link" x-show="!f.is_default" @click="setDefault(f)">Make default</button>
+            <button class="btn sm link danger" @click="deleteFile(f)">Delete</button>
+          </div>
+        </template>
+        <div class="row" style="margin-top:.75rem">
+          <input type="file" accept="application/pdf" x-ref="file" style="max-width:240px">
+          <input type="text" x-model="uploadName" placeholder="Name, e.g. General" style="max-width:160px">
+          <button class="btn sm" @click="upload()" :disabled="uploading">Upload</button>
+        </div>
+        <div class="row" style="margin-top:.5rem">
+          <input type="text" x-model="saveAsName" placeholder="Save builder as PDF named…" style="max-width:260px">
+          <button class="btn sm" @click="saveAs()" :disabled="!saveAsName">Save PDF</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Tailored for a job</h2></div>
+        <p class="tiny muted">Tailoring rewrites the summary and bullets for one posting. Start it from a job's Apply panel, or paste a posting below.</p>
+        <template x-for="t in tailored" :key="t.id">
+          <div class="row small" style="margin-bottom:.4rem">
+            <span><strong x-text="t.title"></strong> · <span x-text="t.company"></span> <span class="chip" x-text="t.status"></span></span>
+            <span class="spacer"></span>
+            <a class="btn sm link" :href="'/api/resume/build?format=pdf&job_id=' + t.id">PDF</a>
+            <a class="btn sm link" :href="'/api/resume/build?format=docx&job_id=' + t.id">DOCX</a>
+            <button class="btn sm link" @click="ats(t.id)">ATS</button>
+          </div>
+        </template>
+        <div class="muted small" x-show="!tailored.length">None yet.</div>
+        <hr>
+        <h3>Paste a posting</h3>
+        <div class="grid-2">
+          <label class="field"><span>Title</span><input type="text" x-model="custom.title"></label>
+          <label class="field"><span>Company</span><input type="text" x-model="custom.company"></label>
+        </div>
+        <label class="field"><span>URL (optional, fetched if description is empty)</span><input type="url" x-model="custom.url"></label>
+        <label class="field"><span>Job description</span><textarea x-model="custom.description"></textarea></label>
+        <button class="btn primary sm" @click="customize()" :disabled="custom.busy"><span class="spin" x-show="custom.busy" x-cloak></span> Add job and tailor</button>
+        <p class="tiny muted">The job lands in your Inbox as well, so you can apply to it from there.</p>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

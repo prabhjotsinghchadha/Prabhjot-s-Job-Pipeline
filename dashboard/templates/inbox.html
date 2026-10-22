@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block content %}
+<div x-data="inbox()" x-init="init()">
+  <div class="page-head">
+    <h1>Inbox</h1>
+    <span class="muted" x-text="subtitle"></span>
+    <span class="spacer"></span>
+    <input type="text" placeholder="Search title, company…" x-model="search" @input.debounce.300ms="load()" style="max-width:240px">
+  </div>
+
+  <div class="tabs">
+    <button :class="{active: tab==='matched'}" @click="tab='matched'; load()">To decide <span class="count" x-text="counts.matched"></span></button>
+    <button :class="{active: tab==='saved'}" @click="tab='saved'; load()">Saved <span class="count" x-text="counts.saved"></span></button>
+    <button :class="{active: tab==='skipped'}" @click="tab='skipped'; load()">Skipped <span class="count" x-text="counts.skipped"></span></button>
+  </div>
+
+  <template x-if="!loading && !jobs.length">
+    <div class="empty">
+      <template x-if="tab==='matched'">
+        <div>
+          <h2>Nothing to decide on</h2>
+          <p x-show="unscored">There are <strong x-text="unscored"></strong> unscored jobs. Press <em>Score</em> in the top bar.</p>
+          <p x-show="!unscored">Press <em>Find jobs</em> in the top bar to look for new postings.</p>
+        </div>
+      </template>
+      <template x-if="tab!=='matched'"><div><h2>Nothing here yet</h2></div></template>
+    </div>
+  </template>
+
+  <template x-for="job in jobs" :key="job.id">
+    <div class="card">
+      <div class="job">
+        <div class="score" :class="fmt.scoreClass(job.match_score)" x-text="job.match_score ?? '–'"></div>
+        <div>
+          <a class="title" :href="job.apply_url || job.url" target="_blank" rel="noopener" x-text="job.title"></a>
+          <div class="meta">
+            <span x-text="job.company"></span>
+            <span x-show="job.location"> · <span x-text="job.location"></span></span>
+            <span x-show="job.date_posted"> · posted <span x-text="fmt.date(job.date_posted)"></span></span>
+            <span x-show="!job.date_posted"> · found <span x-text="fmt.date(job.discovered_at)"></span></span>
+            <span x-show="job.source"> · <span x-text="job.source"></span></span>
+            <span class="chip accent" x-show="job.apply_email" title="This posting gives a hiring email">email apply</span>
+            <span class="chip good" x-show="job.tailored_resume">tailored resume</span>
+          </div>
+          <div class="reason small" x-text="job.reasoning"></div>
+          <div class="small" style="margin-top:.4rem">
+            <button class="btn link sm" @click="job._open = !job._open" x-text="job._open ? 'Hide posting' : 'Show posting'"></button>
+            <button class="btn link sm" @click="rescore(job)" :disabled="job._busy">Re-score</button>
+            <textarea x-show="job._open" x-cloak readonly style="margin-top:.5rem;min-height:200px" x-text="job.description || '(no description stored)'"></textarea>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="btn primary sm" @click="openApply(job)">Apply</button>
+          <button class="btn sm" x-show="tab!=='saved'" @click="save(job)">Save for later</button>
+          <button class="btn sm" x-show="tab!=='skipped'" @click="skip(job)">Skip</button>
+          <button class="btn sm" x-show="tab==='skipped'" @click="restore(job)">Back to inbox</button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <div class="row" x-show="total > jobs.length" x-cloak>
+    <button class="btn" @click="more()">Show more (<span x-text="total - jobs.length"></span> left)</button>
+  </div>
+
+  {% include "apply_drawer.html" %}
+</div>
+{% endblock %}

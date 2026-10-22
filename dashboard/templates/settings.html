@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% block content %}
+<div x-data="settings()" x-init="init()">
+  <div class="page-head">
+    <h1>Settings</h1>
+    <span class="muted small" x-show="needsSetup" x-cloak>First run: fill in the top three sections, then save.</span>
+    <span class="spacer"></span>
+    <button class="btn primary" @click="save()" :disabled="saving || !dirty"><span class="spin" x-show="saving" x-cloak></span> <span x-text="dirty ? 'Save' : 'Saved'"></span></button>
+  </div>
+
+  <details class="section" open>
+    <summary>About you</summary>
+    <div class="body">
+      <div class="grid-2">
+        <label class="field"><span>First name</span><input type="text" x-model="p.personal.first_name" @input="dirty=true"></label>
+        <label class="field"><span>Last name</span><input type="text" x-model="p.personal.last_name" @input="dirty=true"></label>
+        <label class="field"><span>Email</span><input type="email" x-model="p.personal.email" @input="dirty=true"></label>
+        <label class="field"><span>Phone</span><input type="text" x-model="p.personal.phone" @input="dirty=true"></label>
+        <label class="field"><span>Location</span><input type="text" x-model="p.personal.location" @input="dirty=true"></label>
+        <label class="field"><span>LinkedIn</span><input type="url" x-model="p.personal.linkedin" @input="dirty=true"></label>
+        <label class="field"><span>GitHub</span><input type="url" x-model="p.personal.github" @input="dirty=true"></label>
+        <label class="field"><span>Portfolio</span><input type="url" x-model="p.personal.portfolio" @input="dirty=true"></label>
+      </div>
+    </div>
+  </details>
+
+  <details class="section" open>
+    <summary>What you're looking for</summary>
+    <div class="body">
+      <label class="field"><span>Roles (comma-separated). Used for searching and for the title prefilter.</span>
+        <input type="text" :value="fmt.list(p.preferences.roles)" @change="p.preferences.roles = fmt.toList($event.target.value); dirty=true"></label>
+      <label class="field"><span>Keywords (comma-separated)</span>
+        <input type="text" :value="fmt.list(p.preferences.keywords)" @change="p.preferences.keywords = fmt.toList($event.target.value); dirty=true"></label>
+      <label class="field"><span>Locations (comma-separated)</span>
+        <input type="text" :value="fmt.list(p.preferences.locations)" @change="p.preferences.locations = fmt.toList($event.target.value); dirty=true"></label>
+      <label class="check"><input type="checkbox" x-model="p.preferences.remote_only" @change="dirty=true"> Remote only</label>
+      <div class="grid-2">
+        <label class="field"><span>Minimum match score to show in Inbox (0-100)</span><input type="number" min="0" max="100" x-model.number="p.preferences.min_match_score" @input="dirty=true"></label>
+        <label class="field"><span>Companies to exclude (comma-separated)</span>
+          <input type="text" :value="fmt.list(p.preferences.exclude_companies)" @change="p.preferences.exclude_companies = fmt.toList($event.target.value); dirty=true"></label>
+      </div>
+      <label class="field"><span>Ideal job, in your words. Claude scores against this.</span><textarea x-model="p.ideal_job_description" @input="dirty=true"></textarea></label>
+      <label class="field"><span>Favorite companies (comma-separated, +10 score)</span>
+        <input type="text" :value="fmt.list(p.favorite_companies)" @change="p.favorite_companies = fmt.toList($event.target.value); dirty=true"></label>
+    </div>
+  </details>
+
+  <details class="section" open>
+    <summary>Skills</summary>
+    <div class="body">
+      <label class="field"><span>Primary (comma-separated)</span>
+        <input type="text" :value="fmt.list(p.skills.primary)" @change="p.skills.primary = fmt.toList($event.target.value); dirty=true"></label>
+      <label class="field"><span>Secondary (comma-separated)</span>
+        <input type="text" :value="fmt.list(p.skills.secondary)" @change="p.skills.secondary = fmt.toList($event.target.value); dirty=true"></label>
+    </div>
+  </details>
+
+  <details class="section">
+    <summary>Where to look</summary>
+    <div class="body">
+      <h3>Sources</h3>
+      <div class="grid-2">
+        <template x-for="s in sources" :key="s.key">
+          <label class="check" :title="s.description"><input type="checkbox" :checked="p.sources[s.key] !== false" @change="p.sources[s.key] = $event.target.checked; dirty=true"> <span x-text="s.label"></span></label>
+        </template>
+      </div>
+      <h3 style="margin-top:1rem">Company boards</h3>
+      <div class="grid-2">
+        <label class="field"><span>Greenhouse slugs (comma-separated, from boards.greenhouse.io/&lt;slug&gt;)</span>
+          <input type="text" :value="fmt.list(p.target_boards.greenhouse)" @change="p.target_boards.greenhouse = fmt.toList($event.target.value); dirty=true"></label>
+        <label class="field"><span>Lever slugs (from jobs.lever.co/&lt;slug&gt;)</span>
+          <input type="text" :value="fmt.list(p.target_boards.lever)" @change="p.target_boards.lever = fmt.toList($event.target.value); dirty=true"></label>
+      </div>
+      <label class="field"><span>Career page URLs to scrape (one per line)</span>
+        <textarea :value="(p.custom_career_pages||[]).join('\n')" @change="p.custom_career_pages = fmt.lines($event.target.value); dirty=true"></textarea></label>
+      <h3 style="margin-top:1rem">Board search (Indeed, LinkedIn, Google)</h3>
+      <div class="grid-2">
+        <label class="field"><span>Search queries (comma-separated)</span>
+          <input type="text" :value="fmt.list(p.search.queries)" @change="p.search.queries = fmt.toList($event.target.value); dirty=true"></label>
+        <label class="field"><span>Search locations (comma-separated)</span>
+          <input type="text" :value="fmt.list(p.search.locations)" @change="p.search.locations = fmt.toList($event.target.value); dirty=true"></label>
+        <label class="field"><span>Results per query</span><input type="number" x-model.number="p.search.results_per_query" @input="dirty=true"></label>
+      </div>
+      <h3 style="margin-top:1rem">Prefilter (0 tokens, runs before scoring)</h3>
+      <label class="check"><input type="checkbox" x-model="p.preferences.prefilter.enabled" @change="dirty=true"> Enabled</label>
+      <label class="check"><input type="checkbox" x-model="p.preferences.prefilter.require_role_keyword" @change="dirty=true"> Title must relate to one of your roles</label>
+      <label class="check"><input type="checkbox" x-model="p.preferences.prefilter.skip_junior" @change="dirty=true"> Skip junior / intern titles</label>
+      <label class="check"><input type="checkbox" x-model="p.preferences.prefilter.skip_management" @change="dirty=true"> Skip director / VP / head-of titles</label>
+      <div class="grid-2">
+        <label class="field"><span>Skip postings older than (days, 0 = off)</span><input type="number" x-model.number="p.preferences.prefilter.max_age_days" @input="dirty=true"></label>
+        <label class="field"><span>Always skip titles containing (comma-separated)</span>
+          <input type="text" :value="fmt.list(p.preferences.prefilter.title_blocklist)" @change="p.preferences.prefilter.title_blocklist = fmt.toList($event.target.value); dirty=true"></label>
+      </div>
+    </div>
+  </details>
+
+  <details class="section">
+    <summary>Schedule</summary>
+    <div class="body">
+      <label class="check"><input type="checkbox" x-model="p.schedule.enabled" @change="dirty=true"> Run in the background while the dashboard is open</label>
+      <div class="grid-2">
+        <label class="field"><span>Find jobs every (hours)</span><input type="number" x-model.number="p.schedule.discover_interval_hours" @input="dirty=true"></label>
+        <label class="field"><span>Score every (minutes)</span><input type="number" x-model.number="p.schedule.score_interval_minutes" @input="dirty=true"></label>
+      </div>
+      <p class="tiny muted">Claude: <span x-text="claude.ok ? claude.version : (claude.error || 'checking…')"></span></p>
+    </div>
+  </details>
+
+  <details class="section">
+    <summary>Email</summary>
+    <div class="body">
+      <p class="tiny muted">One Gmail account does both: reading your inbox for rejections and interview invites, and sending email applications. Use an <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">App Password</a>, not your real password.</p>
+      <label class="check"><input type="checkbox" x-model="p.email.enabled" @change="dirty=true"> Check inbox for status updates</label>
+      <div class="grid-2">
+        <label class="field"><span>Email</span><input type="email" x-model="p.email.email" @input="dirty=true"></label>
+        <label class="field"><span>App password</span><input type="password" x-model="p.email.app_password" @input="dirty=true"></label>
+        <label class="field"><span>IMAP server</span><input type="text" x-model="p.email.imap_server" @input="dirty=true"></label>
+        <label class="field"><span>Check every (hours)</span><input type="number" x-model.number="p.email.check_interval_hours" @input="dirty=true"></label>
+      </div>
+      <button class="btn sm" @click="testEmail()" :disabled="dirty || testing"><span class="spin" x-show="testing" x-cloak></span> Test connection</button>
+      <span class="tiny muted" x-show="dirty">Save first</span>
+    </div>
+  </details>
+
+  <details class="section">
+    <summary>Common application answers</summary>
+    <div class="body">
+      <p class="tiny muted">Shown in the apply panel so you can copy them into forms.</p>
+      <div class="grid-2">
+        <template x-for="k in Object.keys(p.common_answers)" :key="k">
+          <label class="field"><span x-text="k.replaceAll('_',' ')"></span><input type="text" x-model="p.common_answers[k]" @input="dirty=true"></label>
+        </template>
+      </div>
+      <div class="row">
+        <input type="text" x-model="newAnswer" placeholder="new_field_name" style="max-width:220px">
+        <button class="btn sm" @click="addAnswer()">+ Add answer</button>
+      </div>
+    </div>
+  </details>
+</div>
+{% endblock %}

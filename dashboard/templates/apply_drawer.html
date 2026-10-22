@@ -1,0 +1,87 @@
+<!-- Apply drawer: used by Inbox and Applications. Expects `apply` state from applyDrawer() mixed into the page component. -->
+<template x-if="apply.open">
+  <div>
+    <div class="drawer-backdrop" @click="closeApply()"></div>
+    <div class="drawer" role="dialog" aria-label="Apply">
+      <button class="btn sm close" @click="closeApply()">Close</button>
+      <h2 x-text="apply.job.title"></h2>
+      <p class="muted" x-text="apply.job.company + (apply.job.location ? ' · ' + apply.job.location : '')"></p>
+
+      <div class="tabs" x-show="apply.job.apply_email">
+        <button :class="{active: apply.mode==='email'}" @click="apply.mode='email'; loadDraft()">By email</button>
+        <button :class="{active: apply.mode==='manual'}" @click="apply.mode='manual'; loadKit()">On their site</button>
+      </div>
+
+      <div x-show="apply.loading" class="muted"><span class="spin"></span> <span x-text="apply.loadingText"></span></div>
+      <div x-show="apply.error" class="chip bad" x-text="apply.error" style="white-space:normal;display:block"></div>
+
+      <!-- EMAIL -->
+      <template x-if="apply.mode==='email' && apply.draft">
+      <div class="stack">
+        <label class="field"><span>To</span><input type="email" x-model="apply.draft.to"></label>
+        <label class="field"><span>Subject</span><input type="text" x-model="apply.draft.subject"></label>
+        <label class="field"><span>Body</span><textarea style="min-height:280px" x-model="apply.draft.body"></textarea></label>
+        <p class="small muted">Attached: <span class="mono" x-text="apply.draft.resume ? apply.draft.resume.split('/').pop() : 'no resume on file'"></span>
+          <span x-show="apply.draft.resume && apply.draft.resume.includes('tailored')" class="chip good">tailored</span></p>
+        <div class="btn-row">
+          <button class="btn primary" @click="sendEmail()" :disabled="apply.sending">
+            <span class="spin" x-show="apply.sending" x-cloak></span> Send application
+          </button>
+          <button class="btn" @click="tailor()" :disabled="apply.tailoring"><span class="spin" x-show="apply.tailoring" x-cloak></span> Tailor resume first</button>
+          <button class="btn" @click="skipFromDrawer()">Skip</button>
+        </div>
+        <p class="tiny muted">Nothing is sent until you press Send. The email goes from your own account with the resume attached.</p>
+      </div>
+      </template>
+
+      <!-- MANUAL -->
+      <template x-if="apply.mode==='manual' && apply.kit">
+      <div class="stack">
+        <div class="btn-row">
+          <a class="btn primary" :href="apply.kit.apply_url" target="_blank" rel="noopener">Open application page ↗</a>
+          <button class="btn sm" @click="resolveUrl()" :disabled="apply.resolving" title="Follow the aggregator link to the company's real form">
+            <span class="spin" x-show="apply.resolving" x-cloak></span> Find the real form
+          </button>
+        </div>
+        <p class="tiny muted"><span x-text="fmt.host(apply.kit.apply_url)"></span> · Fill the form in that tab, then come back and press <em>Mark as applied</em>.</p>
+
+        <h3>Resume</h3>
+        <div class="btn-row">
+          <a class="btn sm" :href="'/api/resume/build?format=pdf&job_id=' + apply.job.id" x-show="apply.kit.resume_tailored">Download tailored PDF</a>
+          <a class="btn sm" :href="'/api/resume/build?format=pdf'" x-show="!apply.kit.resume_tailored && apply.hasBuilder">Download PDF</a>
+          <button class="btn sm" @click="tailor()" :disabled="apply.tailoring"><span class="spin" x-show="apply.tailoring" x-cloak></span>
+            <span x-text="apply.kit.resume_tailored ? 'Re-tailor for this job' : 'Tailor for this job'"></span></button>
+        </div>
+        <p class="tiny muted" x-show="apply.kit.resume_path">On disk: <span class="mono" x-text="apply.kit.resume_path"></span></p>
+
+        <h3>Cover letter</h3>
+        <div class="copy-block">
+          <div class="v" x-text="apply.kit.cover_letter || '(none yet)'"></div>
+          <button class="btn sm" @click="copyText(apply.kit.cover_letter)">Copy</button>
+        </div>
+        <button class="btn link sm" @click="rewriteLetter()" :disabled="apply.writing"><span class="spin" x-show="apply.writing" x-cloak></span> Rewrite</button>
+
+        <h3>Your details</h3>
+        <template x-for="[k, v] in Object.entries(apply.kit.contact).filter(([k, v]) => v)" :key="k">
+          <div class="copy-block"><div class="k" x-text="k.replace('_',' ')"></div><div class="v" x-text="v"></div>
+            <button class="btn sm" @click="copyText(v)">Copy</button></div>
+        </template>
+
+        <h3>Common answers</h3>
+        <template x-for="[k, v] in Object.entries(apply.kit.answers)" :key="k">
+          <div class="copy-block"><div class="k" x-text="k.replaceAll('_',' ')"></div><div class="v" x-text="v"></div>
+            <button class="btn sm" @click="copyText(String(v))">Copy</button></div>
+        </template>
+        <p class="tiny muted">Edit these in <a href="/settings">Settings</a>.</p>
+
+        <hr>
+        <label class="field"><span>Note (optional)</span><input type="text" x-model="apply.note" placeholder="e.g. applied via LinkedIn Easy Apply"></label>
+        <div class="btn-row">
+          <button class="btn primary" @click="markApplied()">Mark as applied</button>
+          <button class="btn" @click="skipFromDrawer()">Skip</button>
+        </div>
+      </div>
+      </template>
+    </div>
+  </div>
+</template>
